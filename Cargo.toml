@@ -1,0 +1,42 @@
+[package]
+name = "anime-tool"
+version = "0.0.0"
+edition = "2024"
+description = "Local Dandanplay video matching, danmaku download and ASS rendering tool."
+license = "MIT"
+
+[[bin]]
+name = "ddp-match"
+path = "src/bin/ddp-match.rs"
+
+[[bin]]
+name = "ddp-danmaku"
+path = "src/bin/ddp-danmaku.rs"
+
+[[bin]]
+name = "ddp-anime"
+path = "src/bin/ddp-anime.rs"
+
+[[bin]]
+name = "render-ass"
+path = "src/bin/render-ass.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6"
+md-5 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "brotli",
+    "deflate",
+    "gzip",
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+suppaftp = "12"
+url = "2"
