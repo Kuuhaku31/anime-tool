@@ -21,6 +21,14 @@ path = "src/bin/ddp-anime.rs"
 name = "render-ass"
 path = "src/bin/render-ass.rs"
 
+[[bin]]
+name = "ani-prepare"
+path = "src/bin/ani-prepare.rs"
+
+[[bin]]
+name = "merge-ass"
+path = "src/bin/merge-ass.rs"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
@@ -40,3 +48,4 @@ serde_json = "1"
 sha2 = "0.10"
 suppaftp = "12"
 url = "2"
+urlencoding = "2.1"

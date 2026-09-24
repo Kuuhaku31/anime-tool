@@ -66,16 +66,6 @@
   - `--border <size>` 设置字体描边大小 (单位: pt)
   - `--offset <number>` 设置弹幕时间偏移 (单位: 秒, 正数为延迟, 负数为提前)
 
-### 共同选项
-
-- `--cache-dir <path> | -c <path>` 设置缓存目录
-- `--appid <appid> | -a <appid>` 设置 AppID
-- `--appsecret <appsecret> | -s <appsecret>` 设置 AppSecret
-- `--config <path> | -f <path>` 设置全局配置文件路径,
-  默认: `XDG_CONFIG_HOME/anime-tool/config.json`
-- `--version | -v` 显示版本信息
-- `--help | -h` 显示帮助信息, 不执行任何操作
-
 例子:
 
 ```bash
@@ -88,6 +78,47 @@ render-ass 123456 \
   --border 1 \
   --offset 0.5
 ```
+
+- `ani-prepare <media_path> [OPTIONS]`
+  1. 把视频文件复制到指定目录, 默认是当前路径下的 `<视频文件名称> - ani/` 目录,
+     如果指定了 `--output_dir`, 则复制到该目录, 目录不存在时会自动创建.
+
+     支持 http/https/ftp 等网络协议, 也支持本地文件路径.
+
+  2. 抽取出视频文件的所有字幕轨道, 保存到输出目录 ASS 文件,
+     以 `<轨道号>.<轨道名>.ass` 命名.
+
+  3. 在目录下创建 `ani.json` 文件,
+     记录 `media_path`, `output_dir` 以及抽取的字幕轨道等信息.
+
+  `[OPTIONS]`:
+  - `--output_dir <output_dir>` 设置输出文件夹路径,
+    未设置时默认输出到当前路径下的 `<视频文件名称> - ani/` 目录.
+
+- `merge-ass <字幕ASS文件> <弹幕ASS文件> [OPTIONS]`
+
+  将字幕 ASS 文件和弹幕 ASS 文件合并, 输出到指定路径.
+  实现同一个字幕轨道同时显示字幕和弹幕.
+  1. 对比两个 ASS 文件的画幅比例是否相同, 如果相同则等比合并, 保证字体宽高比一致.
+  2. 如果画幅比例不同, 则在保证弹幕 ASS 文件的画幅大小不变的情况下:
+     - **通过增加字幕 ASS 文件的画幅的宽或者高的方式**, 使其画幅比例与弹幕 ASS 文件一致.
+     - 在增加的画幅区域中, 同步调整字体宽高, 保证画幅比例变化前后字体宽高比不变.
+     - 执行 1 中的等比合并操作.
+
+  `[OPTIONS]`:
+  - `--output_path <output_path>` 设置输出路径,
+    未设置时默认输出到当前目录下的 `<字幕ASS文件名> - <弹幕ASS文件名>.ass`,
+    会覆盖原有文件.
+
+### 共同选项
+
+- `--cache-dir <path> | -c <path>` 设置缓存目录
+- `--appid <appid> | -a <appid>` 设置 AppID
+- `--appsecret <appsecret> | -s <appsecret>` 设置 AppSecret
+- `--config <path> | -f <path>` 设置全局配置文件路径,
+  默认: `XDG_CONFIG_HOME/anime-tool/config.json`
+- `--version | -v` 显示版本信息
+- `--help | -h` 显示帮助信息, 不执行任何操作
 
 ## ASS 渲染规则
 

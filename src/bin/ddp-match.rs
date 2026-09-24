@@ -25,26 +25,53 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        const STACK_SIZE: usize = 16 * 1024 * 1024;
+        let handle = std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(run)
+            .expect("创建工作线程失败");
+        return handle.join().expect("工作线程发生 panic");
+    }
+
+    #[cfg(not(windows))]
+    {
+        run()
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.common.load_config()?;
     let cache_dir = cli.common.cache_dir(&config)?;
-    let info = media::inspect(&cli.file_path)
+    let file_info = media::inspect(&cli.file_path)
         .with_context(|| format!("解析视频文件失败: {}", cli.file_path))?;
 
     let cache = Cache::new(cache_dir);
-    let cache_file = cache.match_file(&info.first_16m_md5);
+    let cache_file = cache.match_file(&file_info.first_16m_md5);
 
     println!("file: {}", cli.file_path);
-    println!("fileName: {}", info.name);
-    println!("fileSize: {}", info.size);
-    println!("fileHash: {}", info.first_16m_md5);
+    println!("fileName: {}", file_info.name);
+    println!("fileSize: {}", file_info.size);
+    println!("first16MibMD5: {}", file_info.first_16m_md5);
     println!("cache: {}", cache_file.display());
 
     if cache_file.is_file() && !cli.query.force_query() {
         if cli.query.no_query {
-            println!("使用现有缓存（--no-query）");
+            println!("使用现有缓存 (--no-query)");
         } else {
-            println!("缓存已存在，不执行网络请求");
+            println!("缓存已存在, 不执行网络请求");
+        }
+
+        if let Ok(body) = std::fs::read_to_string(&cache_file) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                println!("{}", serde_json::to_string_pretty(&value).unwrap_or(body));
+            } else {
+                println!("{body}");
+            }
+        } else {
+            println!("无法读取缓存文件内容");
         }
         return Ok(());
     }
@@ -55,7 +82,11 @@ fn main() -> anyhow::Result<()> {
 
     let (appid, appsecret) = cli.common.credentials(&config)?;
     let client = DandanplayClient::new(appid, appsecret)?;
-    let body = client.match_hash_only(&info.first_16m_md5, info.size)?;
+    let body = client.match_hash_only(
+        &file_info.name,
+        &file_info.first_16m_md5,
+        file_info.size,
+    )?;
 
     cache.write_raw_json(&cache_file, &body)?;
     println!("已保存原始 JSON: {}", cache_file.display());

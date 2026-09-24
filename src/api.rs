@@ -102,13 +102,20 @@ impl DandanplayClient {
         Ok(body)
     }
 
-    pub fn match_hash_only(&self, file_hash: &str, file_size: u64) -> anyhow::Result<String> {
+    pub fn match_hash_only(
+        &self,
+        file_name: &str,
+        file_hash: &str,
+        file_size: u64,
+    ) -> anyhow::Result<String> {
         let api_path = "/api/v2/match";
         let timestamp = Self::timestamp()?;
 
         let mut body = BTreeMap::new();
+        body.insert("fileName", Value::String(file_name.to_owned()));
         body.insert("fileHash", Value::String(file_hash.to_owned()));
         body.insert("fileSize", Value::from(file_size));
+        body.insert("videoDuration", Value::from(0));
         body.insert("matchMode", Value::String("hashOnly".to_owned()));
 
         let response = self

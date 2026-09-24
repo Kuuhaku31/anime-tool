@@ -4,6 +4,7 @@ use anyhow::{Context, bail};
 use md5::{Digest, Md5};
 use suppaftp::FtpStream;
 use url::Url;
+use urlencoding;
 
 pub const HASH_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -16,7 +17,7 @@ pub struct FileInfo {
 pub fn inspect(input: &str) -> anyhow::Result<FileInfo> {
     if let Ok(url) = Url::parse(input) {
         match url.scheme() {
-            "http" | "https" => inspect_http(input, &url),
+            "http" | "https" => inspect_http(&url),
             "ftp" => inspect_ftp(&url),
             "file" => {
                 let path = url
@@ -61,55 +62,68 @@ fn inspect_local(path: &Path) -> anyhow::Result<FileInfo> {
     })
 }
 
-fn inspect_http(input: &str, url: &Url) -> anyhow::Result<FileInfo> {
+fn inspect_http(url: &Url) -> anyhow::Result<FileInfo> {
+    println!("\n开始解析 HTTP(S) URL: {}", url);
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .context("创建 HTTP 客户端失败")?;
 
-    let response = client.head(input).send().context("HTTP HEAD 请求失败")?;
-
-    let mut size = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
-
-    let range_end = HASH_BYTES - 1;
-    let response = client
-        .get(input)
-        .header(reqwest::header::RANGE, format!("bytes=0-{range_end}"))
+    let mut response = client
+        .get(url.clone())
+        .header(reqwest::header::RANGE, format!("bytes=0-{}", HASH_BYTES - 1))
         .send()
         .context("HTTP Range 请求失败")?;
 
-    if response.status().is_success() || response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        if let Some(total) =
-            parse_content_range_total(response.headers().get(reqwest::header::CONTENT_RANGE))
-        {
-            size = Some(total);
+    println!("响应状态: {}", response.status());
+    for (name, value) in response.headers() {
+        println!("\t{name}: {value:?}");
+    }
+
+    let file_name = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let file_name = urlencoding::decode(&file_name)
+        .map(|value| value.to_string())
+        .unwrap_or(file_name);
+
+    let content_range = response.headers().get("Content-Range");
+    let file_size = if let Some(content_range) = content_range {
+        let value = content_range.to_str()?;
+        value
+            .rsplit_once('/')
+            .and_then(|(_, size)| size.parse::<u64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("无效的 Content-Range"))?
+    } else if let Some(content_length) = response.headers().get("Content-Length") {
+        content_length.to_str()?.parse::<u64>()?
+    } else {
+        bail!("服务器未提供文件大小信息");
+    };
+
+    let mut data = Vec::with_capacity(HASH_BYTES as usize);
+    let mut buffer = [0u8; 64 * 1024];
+    while data.len() < HASH_BYTES as usize {
+        let remain = HASH_BYTES as usize - data.len();
+        let read_size = remain.min(buffer.len());
+        let count = response.read(&mut buffer[..read_size])?;
+        if count == 0 {
+            break;
         }
+        data.extend_from_slice(&buffer[..count]);
+    }
 
-        let mut take = response.take(HASH_BYTES);
-        let mut data = Vec::with_capacity(HASH_BYTES as usize);
-        take.read_to_end(&mut data)
-            .context("读取远程视频前 16 MiB 失败")?;
-
-        if size.is_none() && data.len() < HASH_BYTES as usize {
-            size = Some(data.len() as u64);
-        }
-
+    if !data.is_empty() {
         let hash = md5_bytes(&data);
-        let name = url
-            .path_segments()
-            .and_then(|mut s| s.next_back())
-            .and_then(|s| s.rsplit_once('.').map(|x| x.0).or(Some(s)))
-            .filter(|s| !s.is_empty())
-            .unwrap_or("video")
-            .to_owned();
-
+        println!(
+            "解析完成: name='{}', size={}, first_16m_md5={}\n",
+            file_name, file_size, hash
+        );
         return Ok(FileInfo {
-            name,
-            size: size.ok_or_else(|| anyhow::anyhow!("远程 HTTP 资源缺少文件总大小"))?,
+            name: file_name,
+            size: file_size,
             first_16m_md5: hash,
         });
     }
@@ -195,14 +209,4 @@ fn md5_bytes(data: &[u8]) -> String {
     let mut hasher = Md5::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
-}
-
-fn parse_content_range_total(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
-    let value = value?.to_str().ok()?;
-    let total = value.split('/').nth(1)?;
-    if total == "*" {
-        None
-    } else {
-        total.parse().ok()
-    }
 }
