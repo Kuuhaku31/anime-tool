@@ -1,0 +1,26 @@
+{
+  "subject": {
+    "id": 583729,
+    "name": "Anime Name",
+    "date": "2013-04-01"
+  },
+  "episodes": [
+    {
+      "id": 1687829,
+      "airdate": "2013-04-07",
+      "name": "Episode Name A",
+      "duration": 1500
+    },
+    {
+      "id": 1687830,
+      "airdate": "2013-04-14",
+      "name": "Episode Name B",
+      "duration": 1600
+    },
+    {
+      "id": 1687831,
+      "name": "Episode Name C",
+      "duration": 1500
+    }
+  ]
+}

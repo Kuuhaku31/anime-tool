@@ -226,15 +226,113 @@ SQLite 中原表会先删除, 再重新创建. 所有列都是 `TEXT`.
 
 ## json_get
 
-支持:
+输入格式定义为: `<json文件路径>:<JSON路径>`
 
-```text
-data.json:episodes[0]
-data.json:episodes[id=1687829]/airdate
-data.json:subject/episodes[id=1687829]/name
+```json /mnt/C/def/583729.json
+{
+  "subject": {
+    "id": 583729,
+    "name": "Anime Name",
+    "date": "2013-04-01"
+  },
+  "episodes": [
+    {
+      "id": 1687829,
+      "airdate": "2013-04-07",
+      "name": "Episode Name A",
+      "duration": 1500
+    },
+    {
+      "id": 1687830,
+      "airdate": "2013-04-14",
+      "name": "Episode Name B",
+      "duration": 1600
+    },
+    {
+      "id": 1687831,
+      "name": "Episode Name C",
+      "duration": 1500
+    }
+  ]
+}
 ```
 
-其中 `episodes[id=1687829]` 会选取数组中第一个满足条件的对象.
+String -> JsonObject
+
+输入输出示例
+
+```json
+// 输入: /mnt/C/def/583729.json:subject/date
+{
+  "subject": {
+    "date": "2013-04-01"
+  }
+}
+```
+
+```json
+// 支持 {} 表示获取多个字段
+// 输入: /mnt/C/def/583729.json:subject/{date name}
+{
+  "subject": {
+    "date": "2013-04-01",
+    "name": "Anime Name"
+  }
+}
+```
+
+```json
+// 对于数组, 默认返回所有元素的指定字段
+// 输入: /mnt/C/def/583729.json:episodes/airdate
+{
+  "episodes": [
+    {
+      "airdate": "2013-04-07"
+    },
+    {
+      "airdate": "2013-04-14"
+    },
+    {} // 哪怕没有对应字段, 也会返回一个空对象
+  ]
+}
+```
+
+```json
+// 数组条件筛选:
+// 输入: /mnt/C/def/583729.json:episodes[duration=1500]/{name airdate}
+// 其中 episodes[duration=1500] 表示在 episodes 数组中筛选出 duration 等于 1500 的对象.
+// 支持多级筛选, 例如 a/b[x=1]/c[y=test]/name.
+{
+  "episodes": [
+    {
+      "name": "Episode Name A",
+      "airdate": "2013-04-07"
+    },
+    {
+      "name": "Episode Name C"
+    }
+  ]
+}
+```
+
+```json
+// 支持递归 {<json路径> <json路径> ...}
+// 输入: /mnt/C/def/583729.json:{subject/date episodes[duration=1500]/{name airdate}}
+{
+  "subject": {
+    "date": "2013-04-01"
+  },
+  "episodes": [
+    {
+      "name": "Episode Name A",
+      "airdate": "2013-04-07"
+    },
+    {
+      "name": "Episode Name C"
+    }
+  ]
+}
+```
 
 ## md_update
 
@@ -262,3 +360,5 @@ to: out-area
 如果目标区域不存在, 则创建.
 
 JSON 字符串中的实际换行会写成字面量 `\\n`, 保持 meta 的单行 `key: value` 结构.
+
+---
