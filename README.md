@@ -1,6 +1,7 @@
 # Anime Tool
 
-基于 Dandanplay 弹幕网络的本地视频文件识别, 弹幕获取/渲染工具.
+1. 基于 Dandanplay 弹幕网络的本地视频文件识别, 弹幕获取/渲染工具.
+2. JSON 文件信息提取
 
 ## 功能
 
@@ -180,3 +181,84 @@ render-ass 123456 \
 所有需要访问 Dandanplay API 的动作执行都前需要确认 AppID 和 AppSecret 就绪,
 否则报错.
 某些不需要访问 Dandanplay API 的动作, 如渲染 ASS 文件, 不需要 AppID 和 AppSecret.
+
+---
+
+# md-tools
+
+一组用于 Markdown + meta fenced block + JSON 的命令行工具.
+
+## 可执行文件
+
+| Rust 可执行文件 | 用途                                                           |
+| --------------- | -------------------------------------------------------------- |
+| `md2table`      | 读取 Markdown 标题/meta, 输出 TSV CSV, 可选导入 SQLite         |
+| `json_get`      | 按 JSON 路径读取指定值                                         |
+| `md_update`     | 根据 Markdown meta 的 `match/get/to` 从 JSON 更新 fenced block |
+
+## 架构
+
+共通代码位于 `src/`:
+
+- `markdown.rs`: Markdown 标题, meta, fenced block, `match` 文件路径解析.
+- `json_path.rs`: JSON 路径, 数组下标和 `[key=value]` 查询.
+- `sqlite.rs`: SQLite 表覆盖创建和 TEXT 字段批量写入.
+- `lib.rs`: 导出共通模块.
+
+JSON 使用 `serde_json` 的 `preserve_order` 特性, 保留对象字段顺序.
+Markdown 字段使用 `IndexMap`, 保留第一次出现的字段顺序.
+
+## md2table
+
+每个连续 `#` 开头的标题对应一行数据, 不限制标题级别.
+文件开头第一个标题之前的区域作为文件级数据项, 其 `title` 是文件名.
+如果整个文件没有标题, 也至少生成文件级数据项.
+
+`md2table` 只读取 meta, 不要求存在 `match/get/to`.
+
+导入 SQLite 时使用:
+
+```bash
+md2table input.md -o output.csv --to-db data.db:episode
+```
+
+SQLite 中原表会先删除, 再重新创建. 所有列都是 `TEXT`.
+
+## json_get
+
+支持:
+
+```text
+data.json:episodes[0]
+data.json:episodes[id=1687829]/airdate
+data.json:subject/episodes[id=1687829]/name
+```
+
+其中 `episodes[id=1687829]` 会选取数组中第一个满足条件的对象.
+
+## md_update
+
+每个标题单元, 以及文件开头到第一个标题之间的文件级区域,
+都可以包含一个配置用的 `meta`:
+
+````markdown
+```meta
+match: /path/to/583729.json:episodes[id=1687829]
+get: airdate name duration desc ep
+to: out-area
+```
+````
+
+脚本读取 `match` 指定的 JSON 对象, 从中取得 `get` 列出的字段,
+然后更新当前标题单元中的:
+
+````markdown
+```out-area
+...
+```
+````
+
+已有字段原位置更新, 未出现的字段按照 `get` 顺序追加, 未被 `get` 指定的字段保留.
+如果目标区域不存在, 则创建.
+
+JSON 字符串中的实际换行会写成字面量 `\\n`, 保持 meta 的单行 `key: value` 结构.

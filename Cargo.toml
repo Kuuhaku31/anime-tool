@@ -5,29 +5,6 @@ edition = "2024"
 description = "Local Dandanplay video matching, danmaku download and ASS rendering tool."
 license = "MIT"
 
-[[bin]]
-name = "ddp-match"
-path = "src/bin/ddp-match.rs"
-
-[[bin]]
-name = "ddp-danmaku"
-path = "src/bin/ddp-danmaku.rs"
-
-[[bin]]
-name = "ddp-anime"
-path = "src/bin/ddp-anime.rs"
-
-[[bin]]
-name = "render-ass"
-path = "src/bin/render-ass.rs"
-
-[[bin]]
-name = "ani-prepare"
-path = "src/bin/ani-prepare.rs"
-
-[[bin]]
-name = "merge-ass"
-path = "src/bin/merge-ass.rs"
 
 [dependencies]
 anyhow = "1"
@@ -44,8 +21,14 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 sha2 = "0.10"
 suppaftp = "12"
 url = "2"
 urlencoding = "2.1"
+
+
+indexmap = "2"
+csv = "1"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = { version = "1", features = ["preserve_order"] }
