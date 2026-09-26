@@ -61,7 +61,14 @@ fn format_value(value: &Value, indent: usize, max_width: usize) -> String {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => compact,
 
-        Value::String(_) => compact,
+        Value::String(s) => {
+            // 如果 indent + 字符串长度超过最大宽度, 特殊显示
+            if indent + compact.len() <= max_width {
+                compact
+            } else {
+                format!("\"\n{}\n\"", s)
+            }
+        }
 
         Value::Array(array) => {
             if array.is_empty() {
