@@ -54,7 +54,7 @@ fn process_section(
     }
 
     let source = load_match(match_value, cache)?;
-    let output = serde_json::to_string_pretty(&source).context("JSON 序列化失败")?;
+    let output = json_path::format_json(&source, 80);
     let content: Vec<String> = output.lines().map(str::to_string).collect();
 
     // 目标区域存在时原地覆盖, 否则创建.

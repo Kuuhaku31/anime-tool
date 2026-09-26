@@ -18,6 +18,9 @@
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value};
 
+mod to_string_pretty;
+pub use to_string_pretty::format_json;
+
 #[derive(Debug, Clone)]
 pub enum Component {
     // 访问一个 JSON 字段.
@@ -179,15 +182,11 @@ fn resolve_key(current: &Value, key: &str, filter: &Option<Filter>) -> Result<Va
             expected,
         } => array
             .iter()
-            .find(|item| {
-                item.get(cond_key)
-                    .is_some_and(|actual| actual == expected)
-            })
+            .find(|item| item.get(cond_key).is_some_and(|actual| actual == expected))
             .cloned()
             .ok_or_else(|| anyhow!("数组 {key} 中不存在 {cond_key}={expected} 的项目")),
     }
 }
-
 
 struct PathParser {
     chars: Vec<char>,
@@ -680,7 +679,10 @@ mod tests {
     #[test]
     fn get_single_field() {
         let root = sample();
-        assert_eq!(get(&root, "subject/date").unwrap(), json!({"subject": {"date": "2013-04-01"}}));
+        assert_eq!(
+            get(&root, "subject/date").unwrap(),
+            json!({"subject": {"date": "2013-04-01"}})
+        );
     }
 
     #[test]

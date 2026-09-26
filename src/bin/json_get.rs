@@ -49,8 +49,7 @@ fn run(input: &str) -> Result<()> {
     }
 
     // 读取并解析 JSON.
-    let text =
-        fs::read_to_string(file_path).map_err(|err| anyhow!("无法读取 JSON 文件: {err}"))?;
+    let text = fs::read_to_string(file_path).map_err(|err| anyhow!("无法读取 JSON 文件: {err}"))?;
     let root: serde_json::Value =
         serde_json::from_str(&text).map_err(|err| anyhow!("JSON 解析失败: {err}"))?;
 
@@ -58,8 +57,9 @@ fn run(input: &str) -> Result<()> {
     let result = json_path::get(&root, json_path_expr)?;
 
     // 输出漂亮格式 JSON.
-    let output = serde_json::to_string_pretty(&result)
-        .map_err(|err| anyhow!("JSON 序列化失败: {err}"))?;
+    // let output = serde_json::to_string_pretty(&result)
+    //     .map_err(|err| anyhow!("JSON 序列化失败: {err}"))?;
+    let output = json_path::format_json(&result, 80);
 
     println!("{output}");
 
