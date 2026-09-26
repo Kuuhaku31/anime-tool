@@ -8,6 +8,11 @@
 //! - `a[n]` 按下标筛选数组, `a[key=value]` 按字段值筛选数组,
 //!   支持链式筛选, 例如 `a[x=1]/b[y=2]`.
 //!
+//! `get` 用于 `json_get`, 按原始结构包裹输出.
+//! `resolve` 用于 `md_update` 的 `match` 解析, 直接返回未包裹的值,
+//! 字段集合 `{...}` 的结果合并为一个 JSON 对象;
+//! 筛选条件 (`[n]`/`[key=value]`) 只取第一个匹配项.
+//!
 //! 详细语法和输出示例见 README.md 中 `json_get` 一节.
 
 use anyhow::{Result, anyhow};
@@ -55,26 +60,103 @@ pub fn get(root: &Value, path_expr: &str) -> Result<Value> {
 
 /// 按 `字段[条件]` 语法逐级取值, 返回未包裹的原始 JSON 值.
 ///
-/// 数组筛选只取第一个匹配项, 用于 `md_update` 的 `match` 解析,
-/// 结果通常需要是单个 JSON 对象.
+/// 数组字段会自动对每个元素应用相同路径; 筛选条件只取第一个匹配项.
+/// 支持 `{a b}` 字段集合语法, 结果合并为一个 JSON 对象.
 pub fn resolve(root: &Value, path_expr: &str) -> Result<Value> {
     let path = parse(path_expr)?;
-
-    let mut current = root.clone();
-
-    for component in &path {
-        current = resolve_component(&current, component)?;
-    }
-
-    Ok(current)
+    resolve_top(root, &path)
 }
 
-fn resolve_component(current: &Value, component: &Component) -> Result<Value> {
-    let Component::Key { key, filter } = component else {
-        return Err(anyhow!("match 路径不支持字段集合语法 {{...}}"));
-    };
+// 顶层路径求值: 直接返回最终字段的原始值, 不做结构包裹.
+fn resolve_top(current: &Value, path: &[Component]) -> Result<Value> {
+    if path.is_empty() {
+        return Ok(current.clone());
+    }
 
-    let value = current
+    // 数组自动对每个元素应用相同路径, 与 get() 的行为一致.
+    if let Value::Array(items) = current {
+        let mut result = Vec::with_capacity(items.len());
+
+        for item in items {
+            result.push(resolve_top(item, path)?);
+        }
+
+        return Ok(Value::Array(result));
+    }
+
+    match &path[0] {
+        Component::Key { key, filter } => {
+            let value = resolve_key(current, key, filter)?;
+            resolve_top(&value, &path[1..])
+        }
+
+        Component::Group(paths) => {
+            if path.len() != 1 {
+                return Err(anyhow!("字段集合 {{...}} 必须位于路径末尾"));
+            }
+
+            resolve_group(current, paths)
+        }
+    }
+}
+
+// Group 成员求值: 结果按字段名包裹 (嵌套), 以便在 Group 中按名合并.
+fn resolve_member(current: &Value, path: &[Component]) -> Result<Value> {
+    if path.is_empty() {
+        return Ok(current.clone());
+    }
+
+    // 数组自动对每个元素应用相同路径, 与 get() 的行为一致.
+    if let Value::Array(items) = current {
+        let mut result = Vec::with_capacity(items.len());
+
+        for item in items {
+            result.push(resolve_member(item, path)?);
+        }
+
+        return Ok(Value::Array(result));
+    }
+
+    match &path[0] {
+        Component::Key { key, filter } => {
+            let value = resolve_key(current, key, filter)?;
+            let rest = resolve_member(&value, &path[1..])?;
+            Ok(wrap_field(key, rest))
+        }
+
+        Component::Group(paths) => {
+            if path.len() != 1 {
+                return Err(anyhow!("字段集合 {{...}} 必须位于路径末尾"));
+            }
+
+            resolve_group(current, paths)
+        }
+    }
+}
+
+fn resolve_group(current: &Value, paths: &[Vec<Component>]) -> Result<Value> {
+    let mut result = Map::new();
+
+    for sub_path in paths {
+        if sub_path.is_empty() {
+            continue;
+        }
+
+        match resolve_member(current, sub_path)? {
+            Value::Object(fields) => merge_object(&mut result, fields),
+            other => return Err(anyhow!("字段集合中的路径产生了非对象结果: {other}")),
+        }
+    }
+
+    Ok(Value::Object(result))
+}
+
+fn resolve_key(current: &Value, key: &str, filter: &Option<Filter>) -> Result<Value> {
+    let object = current
+        .as_object()
+        .ok_or_else(|| anyhow!("字段 '{key}' 的上层不是 JSON 对象"))?;
+
+    let value = object
         .get(key)
         .ok_or_else(|| anyhow!("JSON 中不存在字段: {key}"))?;
 
@@ -92,7 +174,10 @@ fn resolve_component(current: &Value, component: &Component) -> Result<Value> {
             .cloned()
             .ok_or_else(|| anyhow!("数组 {key} 下标越界: {index}")),
 
-        Filter::Eq { key: cond_key, expected } => array
+        Filter::Eq {
+            key: cond_key,
+            expected,
+        } => array
             .iter()
             .find(|item| {
                 item.get(cond_key)
@@ -102,6 +187,7 @@ fn resolve_component(current: &Value, component: &Component) -> Result<Value> {
             .ok_or_else(|| anyhow!("数组 {key} 中不存在 {cond_key}={expected} 的项目")),
     }
 }
+
 
 struct PathParser {
     chars: Vec<char>,
@@ -673,8 +759,49 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_group_syntax() {
+    fn resolve_group_merges_selected_fields() {
         let root = sample();
-        assert!(resolve(&root, "subject/{date name}").is_err());
+        assert_eq!(
+            resolve(&root, "subject/{date name}").unwrap(),
+            json!({"date": "2013-04-01", "name": "Anime Name"})
+        );
+    }
+
+    #[test]
+    fn resolve_group_with_filtered_nested_path() {
+        let root = sample();
+        assert_eq!(
+            resolve(&root, "episodes[id=2]/{name airdate}").unwrap(),
+            json!({"name": "B", "airdate": "2013-04-14"})
+        );
+    }
+
+    #[test]
+    fn resolve_group_auto_maps_array_field() {
+        let root = sample();
+        assert_eq!(
+            resolve(&root, "episodes/{id name}").unwrap(),
+            json!([
+                {"id": 1, "name": "A"},
+                {"id": 2, "name": "B"},
+                {"id": 3, "name": "C"}
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_recursive_group_over_object_and_array_fields() {
+        let root = sample();
+        assert_eq!(
+            resolve(&root, "{subject/{name date} episodes/{id name}}").unwrap(),
+            json!({
+                "subject": {"name": "Anime Name", "date": "2013-04-01"},
+                "episodes": [
+                    {"id": 1, "name": "A"},
+                    {"id": 2, "name": "B"},
+                    {"id": 3, "name": "C"}
+                ]
+            })
+        );
     }
 }

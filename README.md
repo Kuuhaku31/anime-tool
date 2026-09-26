@@ -371,4 +371,14 @@ to: json out
 
 如果目标区域存在, 原地覆盖, 如果目标区域不存在, 则创建.
 
+`match` 支持和 `json_get` 相同的 JSON 路径语法, 包括字段集合 `{...}`,
+用于只选取部分字段并合并为一个 JSON 对象, 例如:
+
+````markdown
+```meta
+match: /path/to/583729.json:subject/{summary date name}
+to: json out
+```
+````
+
 ---
