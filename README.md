@@ -316,6 +316,18 @@ String -> JsonObject
 ```
 
 ```json
+// 数组下标筛选: 方括号中的纯数字表示按下标筛选.
+// 输入: /mnt/C/def/583729.json:episodes[0]/name
+{
+  "episodes": [
+    {
+      "name": "Episode Name A"
+    }
+  ]
+}
+```
+
+```json
 // 支持递归 {<json路径> <json路径> ...}
 // 输入: /mnt/C/def/583729.json:{subject/date episodes[duration=1500]/{name airdate}}
 {
@@ -342,23 +354,21 @@ String -> JsonObject
 ````markdown
 ```meta
 match: /path/to/583729.json:episodes[id=1687829]
-get: airdate name duration desc ep
-to: out-area
+to: json out
 ```
 ````
 
-脚本读取 `match` 指定的 JSON 对象, 从中取得 `get` 列出的字段,
-然后更新当前标题单元中的:
+读取出 `match` 指定的 JSON 对象, 然后更新当前标题单元中的 `to`
+指定的目标区域, 例如 `json out`:
 
 ````markdown
-```out-area
+```json out
+{
 ...
+}
 ```
 ````
 
-已有字段原位置更新, 未出现的字段按照 `get` 顺序追加, 未被 `get` 指定的字段保留.
-如果目标区域不存在, 则创建.
-
-JSON 字符串中的实际换行会写成字面量 `\\n`, 保持 meta 的单行 `key: value` 结构.
+如果目标区域存在, 原地覆盖, 如果目标区域不存在, 则创建.
 
 ---

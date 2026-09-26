@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 fn fixture_path() -> String {
     format!(
-        "{}/tests/fixtures/json_get_subject.json",
+        "{}/tests/fixtures/object.json",
         env!("CARGO_MANIFEST_DIR")
     )
 }
