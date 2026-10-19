@@ -13,3 +13,4 @@ pub mod markdown;
 pub mod sqlite;
 
 pub mod qbittorrent;
+pub mod postgres;

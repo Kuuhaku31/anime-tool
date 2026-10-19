@@ -11,7 +11,7 @@ const QB_USERNAME: &str = "QB_USERNAME";
 const QB_PASSWORD: &str = "QB_PASSWORD";
 
 pub struct QbConfig {
-    pub url: Option<String>,
+    pub url: String,
     pub port: Option<u16>,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -22,8 +22,7 @@ impl QbConfig {
 
         // 读取字符串类型的环境变量
         let url = env::var(QB_URL)
-            .map_err(|e| eprintln!("获取 {} 失败: {}", QB_URL, e))
-            .ok();
+            .map_err(|e| e.to_string())?;
         let port = env::var(PORT).ok().and_then(|p| {
             p.parse::<u16>()
                 .map_err(|e| eprintln!("获取 {} 失败: {}", PORT, e))
@@ -58,6 +57,22 @@ impl QbConfig {
             }
         );
         println!("}}");
+    }
+
+    pub fn create_client_and_login(&self) -> Result<reqwest::blocking::Client, String> {
+        let client = reqwest::blocking::Client::builder()
+        .cookie_store(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+        let _ = client
+            .post(format!("{}/api/v2/auth/login", self.url))
+            .form(&[("username", &self.username.as_ref().ok_or("缺少用户名")?), ("password", &self.password.as_ref().ok_or("缺少密码")?)])
+            .send()
+            // .context("请求 qBittorrent 登录失败").map_err(|e| e.to_string())?
+            // .error_for_status()
+            // .context("qBittorrent 登录返回错误状态").map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
+        Ok(client)
     }
 }
 
@@ -172,4 +187,29 @@ impl PartialEq for TorrentInfo {
     fn eq(&self, other: &Self) -> bool {
         self.hash_v1 == other.hash_v1
     }
+}
+
+// 获取全部种子信息并构建种子对象列表.
+pub fn get_torrents_info(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<Vec<TorrentInfo>, String> {
+    let response = client
+        .get(format!("{url}/api/v2/torrents/info"))
+        .send()
+        // .context("请求种子信息失败")?
+        // .error_for_status()
+        .map_err(|e| format!("种子信息返回错误状态: {e:?}"))?
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("解析种子信息响应失败: {e:?}"))?;
+    response
+        .as_array()
+        .ok_or_else(|| "种子信息响应不是数组".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            TorrentInfo::new_from_json(value)
+                .map_err(|e| format!("解析第 {} 个种子信息失败: {e:?}", index + 1))
+        })
+        .collect()
 }

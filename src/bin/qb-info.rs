@@ -43,7 +43,7 @@ fn run() -> Result<(), String> {
 
     // 加载配置
     let config = QbConfig::from_env().map_err(anyhow::Error::msg).map_err(|e| e.to_string())?;
-    let url = config.url.context("请设置 QBITTORRENT_URL 环境变量").map_err(|e| e.to_string())?;
+    let url = config.url;
     let url = url.trim_end_matches('/');
     let username = config.username.context("请设置 QB_USERNAME 环境变量").map_err(|e| e.to_string())?;
     let password = config.password.context("请设置 QB_PASSWORD 环境变量").map_err(|e| e.to_string())?;
@@ -65,7 +65,7 @@ fn run() -> Result<(), String> {
         .context("qBittorrent 登录返回错误状态").map_err(|e| e.to_string())?;
 
     // 获取种子信息列表
-    let mut torrent_infos = get_torrents_info(&client, url).map_err(|e| e.to_string())?;
+    let mut torrent_infos = anime_tool::qbittorrent::get_torrents_info(&client, url).map_err(|e| e.to_string())?;
     println!("获取种子信息数量: {}", torrent_infos.len());
 
     // 顺序请求每个种子的文件列表和种子文件数据, 全部获取成功后才开始写库.
@@ -377,32 +377,6 @@ fn append_missing_sha256_batch(
     }}));
 
     Ok(())
-}
-
-// 获取全部种子信息并构建种子对象列表.
-fn get_torrents_info(
-    client: &reqwest::blocking::Client,
-    url: &str,
-) -> Result<Vec<TorrentInfo>> {
-    let response = client
-        .get(format!("{url}/api/v2/torrents/info"))
-        .send()
-        .context("请求种子信息失败")?
-        .error_for_status()
-        .context("种子信息返回错误状态")?
-        .json::<serde_json::Value>()
-        .context("解析种子信息响应失败")?;
-    response
-        .as_array()
-        .context("种子信息响应不是数组")?
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            TorrentInfo::new_from_json(value)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("解析第 {} 个种子信息失败", index + 1))
-        })
-        .collect()
 }
 
 // 插入或更新种子标识, 标题, 分类, 文件数据及文件标识和相对路径.
