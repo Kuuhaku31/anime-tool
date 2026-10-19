@@ -6,6 +6,7 @@ use std::env;
 
 use anime_tool::qbittorrent::{QbConfig, TorrentInfo};
 use anyhow::{Context, Result};
+use indicatif::ProgressStyle;
 
 // 执行同步流程并在失败时输出完整错误链.
 fn main() {
@@ -45,6 +46,15 @@ fn run() -> Result<()> {
     println!("获取种子信息数量: {}", torrent_infos.len());
 
     // 顺序请求每个种子的文件列表和种子文件数据, 全部获取成功后才开始写库.
+    let pb = indicatif::ProgressBar::new(torrent_infos.len() as u64); // 创建总长度为种子数量的进度条.
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}"
+        )
+        .unwrap()
+        .progress_chars("##-"),
+    );
+    pb.set_position(0); // 初始化进度条位置为 0
     for torrent_info in &mut torrent_infos {
         let hash = hex::encode(torrent_info.hash_v1);
         let files = client
@@ -76,7 +86,9 @@ fn run() -> Result<()> {
             .set_files_info_from_json(&files)
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("设置种子 {hash} 的文件信息失败"))?;
+        pb.inc(1); // 更新进度条位置
     }
+    pb.finish_with_message("所有种子文件信息获取完成"); // 完成进度条显示
 
     // 获取每个种子的文件数量
     let mut total_file_count = 0;

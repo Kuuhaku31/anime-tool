@@ -38,3 +38,4 @@ dotenvy = "0.15"
 hex = "0.4.3"
 
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+indicatif = "0.18.6"
