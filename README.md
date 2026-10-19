@@ -3,6 +3,11 @@
 1. 基于 Dandanplay 弹幕网络的本地视频文件识别, 弹幕获取/渲染工具.
 2. JSON 文件信息提取
 
+## 数据库文档
+
+- [Torrent 表结构](docs/torrent-schema.md): `public.torrent` 和 `public.torrent_file`
+  的字段, 约束, 索引, 关联关系和建表 SQL.
+
 ## 功能
 
 ### 视频文件识别

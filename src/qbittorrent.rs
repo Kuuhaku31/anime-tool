@@ -62,8 +62,9 @@ impl QbConfig {
     }
 }
 
-struct TorrentFileInfo {
-    relative_path: PathBuf,
+#[derive(Clone)]
+pub struct TorrentFileInfo {
+    pub relative_path: PathBuf,
     progress_complete: bool,
 }
 
@@ -72,7 +73,7 @@ pub struct TorrentInfo {
     pub category: Option<String>,
     pub title: Option<String>,
     save_path: Option<PathBuf>,
-    files_info: Option<Vec<TorrentFileInfo>>,
+    pub files_info: Option<Vec<TorrentFileInfo>>,
 }
 
 
