@@ -68,8 +68,9 @@ struct TorrentFileInfo {
 }
 
 pub struct TorrentInfo {
-    hash_v1: [u8; 20], // primary key
-    category: Option<String>,
+    pub hash_v1: [u8; 20], // primary key
+    pub category: Option<String>,
+    pub title: Option<String>,
     save_path: Option<PathBuf>,
     files_info: Option<Vec<TorrentFileInfo>>,
 }
@@ -115,11 +116,13 @@ impl TorrentInfo {
 
         let category = torrent_info["category"].as_str().map(|s| s.to_string());
         let save_path = torrent_info["save_path"].as_str().map(|s| PathBuf::from(s));
+        let title = torrent_info["name"].as_str().map(|s| s.to_string());
 
         Ok(Self {
             hash_v1,
             category,
             save_path,
+            title,
             files_info: None,
         })
     }
@@ -131,6 +134,7 @@ impl TorrentInfo {
             .map(|b| format!("{:02x}", b))
             .collect::<String>();
         let category_str = self.category.as_deref().unwrap_or("null");
+        let title_str = self.title.as_deref().unwrap_or("null");
         let save_path_str = self
             .save_path
             .as_deref()
@@ -140,6 +144,7 @@ impl TorrentInfo {
         serde_json::json!({
             "hash_v1": hash_v1_str,
             "category": category_str,
+            "title": title_str,
             "save_path": save_path_str,
             "files_info": self.files_info.as_ref().map(|file_infos| {
                 file_infos.iter().map(|f| {
@@ -159,4 +164,3 @@ impl PartialEq for TorrentInfo {
         self.hash_v1 == other.hash_v1
     }
 }
-
