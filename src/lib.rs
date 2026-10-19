@@ -11,3 +11,5 @@ pub mod prepare;
 pub mod json_path;
 pub mod markdown;
 pub mod sqlite;
+
+pub mod qbittorrent;
