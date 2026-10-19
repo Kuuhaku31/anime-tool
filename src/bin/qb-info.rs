@@ -4,7 +4,7 @@
 
 use std::env;
 
-use anime_tool::qbittorrent::{QbConfig, TorrentFileInfo, TorrentInfo};
+use anime_tool::qbittorrent::{QbConfig, TorrentInfo};
 use anyhow::{Context, Result};
 
 // 执行同步流程并在失败时输出完整错误链.
@@ -108,47 +108,102 @@ fn update_postgres(
     torrent_infos: &[TorrentInfo],
 ) -> Result<(), String> {
 
-    // 准备插入业务语句
-    let mut transaction = client.transaction().map_err(|e| format!("开始更新种子事务失败: {e:?}"))?;
-    let torrent_statement = transaction.prepare(
-        "INSERT INTO public.torrent (torrent_hash_v1, title, category)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (torrent_hash_v1) DO UPDATE SET
-                title = EXCLUDED.title,
-                category = EXCLUDED.category",
-    )
-    .map_err(|e| format!("准备种子更新语句失败: {e:?}"))?;
-    let file_statement = transaction.prepare(
-        "INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
-            VALUES ($1, $2)
-            ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING",
-    )
-    .map_err(|e| format!("准备种子文件插入语句失败: {e:?}"))?;
+    // 每批处理的最大记录数, 可根据实际数据量调整.
+    const BATCH_SIZE: usize = 1000;
 
-    // 遍历种子信息并更新数据库记录
+    // 没有数据时无需创建事务.
+    if torrent_infos.is_empty() { return Ok(()); }
+
+    // 开启事务, 确保所有更新操作一起提交.
+    let mut transaction = client.transaction().map_err(|e| format!("开始更新种子事务失败: {e:?}"))?;
+
+    // 准备种子批量更新语句.
+    // 使用 DISTINCT ON 处理同一批次中的重复 hash, 保留最后一次出现的记录.
+    let torrent_statement = transaction.prepare(
+        r#"
+        INSERT INTO public.torrent (torrent_hash_v1, title, category)
+        SELECT torrent_hash_v1, title, category
+        FROM (
+            SELECT DISTINCT ON (torrent_hash_v1) torrent_hash_v1, title, category
+            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[])
+            WITH ORDINALITY AS input(torrent_hash_v1, title, category, ord)
+            ORDER BY torrent_hash_v1, ord DESC
+        ) AS latest
+        ON CONFLICT (torrent_hash_v1) DO UPDATE SET
+            title = EXCLUDED.title,
+            category = EXCLUDED.category
+        "#,
+    ).map_err(|e| format!("准备种子批量更新语句失败: {e:?}"))?;
+
+    // 准备种子文件批量插入语句.
+    // 发生联合主键冲突时保留已有记录及其 sha256.
+    let file_statement = transaction.prepare(
+        r#"
+        INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
+        SELECT torrent_hash_v1, relative_path
+        FROM UNNEST($1::TEXT[], $2::TEXT[])
+        AS input(torrent_hash_v1, relative_path)
+        ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING
+        "#,
+    ).map_err(|e| format!("准备种子文件批量插入语句失败: {e:?}"))?;
+
+    // 分批更新种子基本信息.
+    for chunk in torrent_infos.chunks(BATCH_SIZE) {
+
+        // 将每一列转换为 PostgreSQL 数组参数.
+        let hashes: Vec<_> = chunk.iter().map(|i| hex::encode(i.hash_v1)).collect();
+        let titles: Vec<_> = chunk.iter().map(|i| i.title.clone()).collect();
+        let categories: Vec<_> = chunk.iter().map(|i| i.category.clone()).collect();
+
+        // 一次请求更新整批种子.
+        transaction.execute(
+            &torrent_statement,
+            &[&hashes, &titles, &categories],
+        ).map_err(|e| format!("批量更新种子失败: {e:?}"))?;
+    }
+
+    // 用两个数组缓存待插入的文件记录.
+    let mut file_hashes = Vec::with_capacity(BATCH_SIZE);
+    let mut file_paths = Vec::with_capacity(BATCH_SIZE);
+
+    // 遍历文件信息时直接借用, 不再克隆 files_info.
     for torrent_info in torrent_infos {
 
         let hash = hex::encode(torrent_info.hash_v1);
+
+        if let Some(files) = &torrent_info.files_info { for file in files {
+
+            // 数据库使用 TEXT 保存路径, 因此要求路径为有效 UTF-8.
+            let relative_path = file.relative_path.to_str()
+            .ok_or_else(|| {format!("种子 {hash} 的文件路径不是有效的 UTF-8")})?;
+
+            // 将文件记录加入缓存.
+            file_hashes.push(hash.clone());
+            file_paths.push(relative_path.to_owned());
+
+            // 达到批次大小时立即写入数据库.
+            if file_hashes.len() >= BATCH_SIZE {
+                transaction.execute(
+                    &file_statement,
+                    &[&file_hashes, &file_paths],
+                ).map_err(|e| format!("批量插入种子文件失败: {e:?}"))?;
+
+                // 清空缓存, 为下一批文件记录做准备.
+                file_hashes.clear();
+                file_paths.clear();
+            }
+
+        }} else { eprintln!("种子 {hash} 没有文件信息"); }
+    }
+    // 插入最后一批不足 BATCH_SIZE 的文件记录.
+    if !file_hashes.is_empty() {
         transaction.execute(
-            &torrent_statement,
-            &[&hash, &torrent_info.title, &torrent_info.category],
-        )
-        .map_err(|e| format!("更新种子 {hash} 失败: {e:?}"))?;
-
-        let files: Vec<TorrentFileInfo> = match &torrent_info.files_info {
-            Some(f) => f.clone(),
-            None => Vec::new(),
-        };
-
-        for file in files {
-            let relative_path = file.relative_path.to_str().ok_or_else(|| format!("种子 {hash} 的文件信息缺少有效的 relative_path"))?;
-            // 文件的两个指定字段均为联合主键, 冲突时保留已有记录及 sha256.
-            transaction.execute(&file_statement, &[&hash, &relative_path])
-            .map_err(|e| format!("插入种子文件 {}/{} 失败: {:?}", hash, relative_path, e))?;
-        }
+            &file_statement,
+            &[&file_hashes, &file_paths],
+        ).map_err(|e| format!("批量插入种子文件失败: {e:?}"))?;
     }
 
-    // 提交事务, 确保所有更新操作一起生效
+    // 所有操作成功后统一提交.
     transaction.commit().map_err(|e| format!("提交种子更新事务失败: {e:?}"))?;
 
     Ok(())
