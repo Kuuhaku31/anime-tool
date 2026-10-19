@@ -177,92 +177,79 @@ fn run() -> Result<(), String> {
     let next_index = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel::<(usize, Result<Option<HashSha256>, String>)>();
 
-    // 保存各文件的计算结果.
-    let mut computed_hashes: Vec<Option<HashSha256>> = vec![None; file_count];
     let mut first_error: Option<String> = None;
 
-    thread::scope(|scope| {
+    thread::scope(|scope| -> Result<(), String> {
+        for _ in 0..worker_count {
+            let tx = tx.clone();
+            let pb = pb.clone();
+            let next_index = &next_index;
 
-    for _ in 0..worker_count {
-        let tx = tx.clone();
-        let pb = pb.clone();
-        let next_index = &next_index;
+            // 切片引用和 usize 均可复制, 不会移动原始文件列表.
+            let files = files;
+            let file_count = file_count;
 
-        // 切片引用和 usize 均可复制, 不会移动原始文件列表.
-        let files = files;
-        let file_count = file_count;
+            scope.spawn(move || {
+                loop {
+                    // 原子分配任务索引, 确保每个文件只被分配一次.
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    if index >= file_count {
+                        break;
+                    }
 
-        scope.spawn(move || {
-            loop {
-                // 原子分配任务索引, 确保每个文件只被分配一次.
-                let index = next_index.fetch_add(1, Ordering::Relaxed);
-                if index >= file_count {
-                    break;
-                }
-
-                // 使用借用的切片访问文件信息.
-                let result = match files[index].absolute_path.as_deref() {
-                    Some(path) => calculate_sha256_file(path)
-                        .map(Some)
-                        .map_err(|e| {
-                            format!(
-                                "计算文件 {} 的 SHA-256 失败: {e}",
-                                path.display()
-                            )
+                    // 使用借用的切片访问文件信息.
+                    let result = match files[index].absolute_path.as_deref() {
+                        Some(path) => calculate_sha256_file(path).map(Some).map_err(|e| {
+                            format!("计算文件 {} 的 SHA-256 失败: {e}", path.display())
                         }),
-                    None => Ok(None),
-                };
+                        None => Ok(None),
+                    };
 
-                // 更新进度并将计算结果发送给主线程.
-                pb.inc(1);
+                    // 更新进度并将计算结果发送给主线程.
+                    pb.inc(1);
 
-                if tx.send((index, result)).is_err() {
-                    break;
+                    if tx.send((index, result)).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    // 关闭主线程持有的发送端, 使接收循环在所有工作线程结束后退出.
-    drop(tx);
+        // 关闭主线程持有的发送端, 使接收循环在所有工作线程结束后退出.
+        drop(tx);
 
-    // 由主线程收集结果, 不在线程间共享 PostgreSQL 连接.
-    for (index, result) in rx {
-        match result {
-            Ok(hash) => computed_hashes[index] = hash,
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
+        // 由主线程收集结果并立即写库, 不在线程间共享 PostgreSQL 连接.
+        for (index, result) in rx {
+            match result {
+                Ok(Some(hash)) => {
+                    let missing_file = &missing_files[index];
+                    let sha256_hex = hex::encode(hash);
+                    let torrent_hash_v1 = hex::encode(missing_file.torrent_hash_v1);
+                    let relative_path = missing_file.relative_path.to_string_lossy().into_owned();
+
+                    // 只填充仍然缺失的 SHA-256, 避免覆盖其他进程写入的摘要.
+                    connection
+                        .execute(
+                            "UPDATE public.torrent_file SET sha256 = $1 WHERE torrent_hash_v1 = $2 AND relative_path = $3 AND sha256 IS NULL",
+                            &[&sha256_hex, &torrent_hash_v1, &relative_path],
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
             }
         }
-    }
 
-    });
+        Ok(())
+    })?;
 
     if let Some(error) = first_error {
         pb.finish_with_message("SHA-256 计算失败");
         return Err(error);
-    }
-    pb.set_message("正在更新数据库");
-
-    // SHA-256 全部计算成功后, 再由主线程依次写入 PostgreSQL.
-    // 这样任何文件读取失败都不会造成只更新了一部分摘要的情况.
-    for (index, sha256_result) in computed_hashes.into_iter().enumerate() {
-        let Some(sha256_result) = sha256_result else {
-            continue;
-        };
-
-        let missing_file = &missing_files[index];
-        let sha256_hex = hex::encode(sha256_result);
-        let torrent_hash_v1 = hex::encode(&missing_file.torrent_hash_v1);
-        let relative_path = missing_file.relative_path.to_string_lossy().into_owned();
-
-        // 只填充仍然缺失的 SHA-256, 避免覆盖其他进程写入的摘要.
-        connection.execute(
-            "UPDATE public.torrent_file SET sha256 = $1 WHERE torrent_hash_v1 = $2 AND relative_path = $3 AND sha256 IS NULL",
-            &[&sha256_hex, &torrent_hash_v1, &relative_path],
-        ).map_err(|e| e.to_string())?;
     }
     pb.finish_with_message("计算并更新 SHA-256 完成");
 
