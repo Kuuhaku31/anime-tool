@@ -71,14 +71,14 @@ impl QbConfig {
 
 struct TorrentFileInfo {
     relative_path: PathBuf,
-    is_seed: bool,
+    progress_complete: bool,
 }
 
 struct TorrentInfo {
     hash_v1: [u8; 20], // primary key
     category: Option<String>,
     save_path: Option<PathBuf>,
-    file_infos: Vec<TorrentFileInfo>,
+    files_info: Option<Vec<TorrentFileInfo>>,
 }
 
 impl Eq for TorrentInfo {}
@@ -89,13 +89,33 @@ impl PartialEq for TorrentInfo {
 }
 
 impl TorrentInfo {
-    fn from_json_response(
-        torrent_info: &serde_json::Value,
-        file_infos: &serde_json::Value,
-    ) -> Result<Self, String> {
-        let hash_v1_str = torrent_info["infohash_v1"]
-            .as_str()
-            .ok_or("缺少 infohash_v1 字段")?;
+    fn set_files_info_from_json(&mut self, file_infos: &serde_json::Value) -> Result<(), String> {
+
+        if self.files_info.is_some() { return Err("files_info 已经存在".to_string()); }
+
+        let files_info_array = file_infos.as_array().ok_or("缺少 files_info 字段")?;
+        self.files_info = Some(Vec::new());
+        for f in files_info_array {
+            let relative_path = match f["name"].as_str() {
+                Some(s) => PathBuf::from(s),
+                None => return Err("缺少 name 字段".to_string()),
+            };
+            let complete = match f["progress"].as_f64() {
+                Some(p) => p == 1.0,
+                None => return Err("缺少 progress 字段".to_string()),
+            };
+            self.files_info.as_mut().unwrap().push(TorrentFileInfo {
+                relative_path,
+                progress_complete: complete,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn new_from_json(torrent_info: &serde_json::Value) -> Result<Self, String> {
+
+        let hash_v1_str = torrent_info["infohash_v1"].as_str().ok_or("缺少 infohash_v1 字段")?;
         let mut hash_v1 = [0u8; 20];
         for (i, byte) in hash_v1_str.as_bytes().chunks(2).enumerate() {
             if i < 20 {
@@ -108,28 +128,12 @@ impl TorrentInfo {
 
         let category = torrent_info["category"].as_str().map(|s| s.to_string());
         let save_path = torrent_info["save_path"].as_str().map(|s| PathBuf::from(s));
-        let file_infos = file_infos.as_array().ok_or("缺少 file_infos 字段")?;
-        let mut file_infos_vec = Vec::new();
-        for f in file_infos {
-            let relative_path = match f["name"].as_str() {
-                Some(s) => PathBuf::from(s),
-                None => return Err("缺少 name 字段".to_string()),
-            };
-            let is_seed = match f["is_seed"].as_bool() {
-                Some(b) => b,
-                None => return Err("缺少 is_seed 字段".to_string()),
-            };
-            file_infos_vec.push(TorrentFileInfo {
-                relative_path,
-                is_seed,
-            });
-        }
 
         Ok(Self {
             hash_v1,
             category,
             save_path,
-            file_infos: file_infos_vec,
+            files_info: None,
         })
     }
 
@@ -150,12 +154,14 @@ impl TorrentInfo {
             "hash_v1": hash_v1_str,
             "category": category_str,
             "save_path": save_path_str,
-            "file_infos": self.file_infos.iter().map(|f| {
-                serde_json::json!({
-                    "relative_path": f.relative_path,
-                    "is_seed": f.is_seed
-                })
-            }).collect::<Vec<_>>()
+            "files_info": self.files_info.as_ref().map(|file_infos| {
+                file_infos.iter().map(|f| {
+                    serde_json::json!({
+                        "relative_path": f.relative_path,
+                        "is_complete": f.progress_complete
+                    })
+                }).collect::<Vec<_>>()
+            }).unwrap_or(Vec::new())
         })
     }
 }
@@ -222,12 +228,15 @@ fn main() {
     }
     let files_json: serde_json::Value =
         files_response.json().expect("解析种子文件列表为 JSON 失败");
+    println!("种子文件列表: {}", serde_json::to_string_pretty(&files_json).expect("格式化 JSON 失败"));
 
     let json_response = &info_response[0];
 
     // 创建 TorrentInfo 实例
-    let torrent_info =
-        TorrentInfo::from_json_response(json_response, &files_json).expect("解析 Torrent 信息失败");
+    let mut torrent_info =
+        TorrentInfo::new_from_json(json_response).expect("解析 Torrent 信息失败");
+    // 设置文件信息
+    let _ = torrent_info.set_files_info_from_json(&files_json);
 
     println!(
         "Torrent 信息: {}",
