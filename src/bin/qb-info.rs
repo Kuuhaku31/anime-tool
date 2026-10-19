@@ -2,8 +2,13 @@
 //! src/bin/qb-info.rs
 //! 顺序获取 qBittorrent 种子及文件信息, 并同步指定字段到 PostgreSQL.
 
+use std::env;
 use std::fs::File;
-use std::{env, path::PathBuf};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use anime_tool::qbittorrent::{QbConfig, TorrentInfo};
 use anyhow::{Context, Result};
@@ -146,36 +151,140 @@ fn run() -> Result<(), String> {
     }
     if missing_files.len() > 20 { println!("其余 {} 个文件未显示", missing_files.len() - 20);}
 
-    // 计算缺失的 sha256, 并插入更新数据库
-    let pb = indicatif::ProgressBar::new(missing_files.len() as u64); // 创建总长度为种子数量的进度条.
+    // 并行计算所有缺失文件的 SHA-256; 数据库操作仍在主线程执行.
+    let pb = indicatif::ProgressBar::new(missing_files.len() as u64);
     pb.set_style(
-        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}")
-        .unwrap().progress_chars("##-"),
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}",
+        )
+        .unwrap()
+        .progress_chars("##-"),
     );
-    pb.set_position(0); // 初始化进度条位置为 0
-    for file in &missing_files {
-        if let Some(path) = &file.absolute_path {
-            let mut f = File::open(path).map_err(|e| e.to_string())?;
-            let mut hasher = Sha256::new();
+    pb.set_message("并行计算 SHA-256");
 
-            std::io::copy(&mut f, &mut hasher).map_err(|e| e.to_string())?;
-            let sha256_result = hasher.finalize();
-            let sha256_hex = hex::encode(sha256_result);
+    // 默认使用可用的逻辑 CPU 数量作为工作线程数.
+    // 即使文件列表为空, 也至少创建一个工作线程, 以便代码路径保持简单.
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(missing_files.len().max(1));
 
-            // 插入或更新数据库中的 sha256
-            let sha256_hex = sha256_hex;
-            let torrent_hash_v1 = hex::encode(&file.torrent_hash_v1);
-            let relative_path = &file.relative_path.to_string_lossy();
-            connection.execute(
-                "UPDATE public.torrent_file SET sha256 = $1 WHERE torrent_hash_v1 = $2 AND relative_path = $3",
-                &[&sha256_hex, &torrent_hash_v1, &relative_path],
-            ).map_err(|e| e.to_string())?;
-        }
-        pb.inc(1); // 更新进度条位置
+    // 只借用文件列表, 不转移 Vec 的所有权.
+    let files = missing_files.as_slice();
+    let file_count = files.len();
+
+    // 创建原子索引和结果通道.
+    let next_index = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<(usize, Result<Option<HashSha256>, String>)>();
+
+    // 保存各文件的计算结果.
+    let mut computed_hashes: Vec<Option<HashSha256>> = vec![None; file_count];
+    let mut first_error: Option<String> = None;
+
+    thread::scope(|scope| {
+
+    for _ in 0..worker_count {
+        let tx = tx.clone();
+        let pb = pb.clone();
+        let next_index = &next_index;
+
+        // 切片引用和 usize 均可复制, 不会移动原始文件列表.
+        let files = files;
+        let file_count = file_count;
+
+        scope.spawn(move || {
+            loop {
+                // 原子分配任务索引, 确保每个文件只被分配一次.
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                if index >= file_count {
+                    break;
+                }
+
+                // 使用借用的切片访问文件信息.
+                let result = match files[index].absolute_path.as_deref() {
+                    Some(path) => calculate_sha256_file(path)
+                        .map(Some)
+                        .map_err(|e| {
+                            format!(
+                                "计算文件 {} 的 SHA-256 失败: {e}",
+                                path.display()
+                            )
+                        }),
+                    None => Ok(None),
+                };
+
+                // 更新进度并将计算结果发送给主线程.
+                pb.inc(1);
+
+                if tx.send((index, result)).is_err() {
+                    break;
+                }
+            }
+        });
     }
-    pb.finish_with_message("计算 sha256 完成");
+
+    // 关闭主线程持有的发送端, 使接收循环在所有工作线程结束后退出.
+    drop(tx);
+
+    // 由主线程收集结果, 不在线程间共享 PostgreSQL 连接.
+    for (index, result) in rx {
+        match result {
+            Ok(hash) => computed_hashes[index] = hash,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    });
+
+    if let Some(error) = first_error {
+        pb.finish_with_message("SHA-256 计算失败");
+        return Err(error);
+    }
+    pb.set_message("正在更新数据库");
+
+    // SHA-256 全部计算成功后, 再由主线程依次写入 PostgreSQL.
+    // 这样任何文件读取失败都不会造成只更新了一部分摘要的情况.
+    for (index, sha256_result) in computed_hashes.into_iter().enumerate() {
+        let Some(sha256_result) = sha256_result else {
+            continue;
+        };
+
+        let missing_file = &missing_files[index];
+        let sha256_hex = hex::encode(sha256_result);
+        let torrent_hash_v1 = hex::encode(&missing_file.torrent_hash_v1);
+        let relative_path = missing_file.relative_path.to_string_lossy().into_owned();
+
+        // 只填充仍然缺失的 SHA-256, 避免覆盖其他进程写入的摘要.
+        connection.execute(
+            "UPDATE public.torrent_file SET sha256 = $1 WHERE torrent_hash_v1 = $2 AND relative_path = $3 AND sha256 IS NULL",
+            &[&sha256_hex, &torrent_hash_v1, &relative_path],
+        ).map_err(|e| e.to_string())?;
+    }
+    pb.finish_with_message("计算并更新 SHA-256 完成");
 
     Ok(())
+}
+
+// 使用固定大小的缓冲区流式计算文件 SHA-256, 避免将整个文件读入内存.
+fn calculate_sha256_file(path: &Path) -> std::io::Result<HashSha256> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    // 使用堆内存缓冲区, 避免每个工作线程占用过大的栈空间.
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(hasher.finalize().into())
 }
 
 // 表示数据库中尚未计算 sha256 的种子文件.
