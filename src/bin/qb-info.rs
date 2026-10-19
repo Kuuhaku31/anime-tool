@@ -63,6 +63,13 @@ fn run() -> Result<()> {
             .with_context(|| format!("设置种子 {hash} 的文件信息失败"))?;
     }
 
+    // 获取每个种子的文件数量
+    let mut total_file_count = 0;
+    for torrent_info in &torrent_infos {
+        total_file_count += torrent_info.get_file_count();
+    }
+    println!("获取的文件总数量: {}", total_file_count);
+
     let mut connection = connect_postgres()?;
     update_postgres(&mut connection, &torrent_infos).map_err(anyhow::Error::msg)?;
     println!("同步种子信息完成: {} 个种子", torrent_infos.len());
@@ -100,39 +107,33 @@ fn update_postgres(
     client: &mut postgres::Client,
     torrent_infos: &[TorrentInfo],
 ) -> Result<(), String> {
-    if torrent_infos.is_empty() {
-        return Ok(());
-    }
 
-    // 使用事务保证种子与文件记录一起提交, 失败时整体回滚.
-    let mut transaction = client
-        .transaction()
-        .map_err(|e| format!("开始更新种子事务失败: {e:?}"))?;
-    let torrent_statement = transaction
-        .prepare(
-            "INSERT INTO public.torrent (torrent_hash_v1, title, category)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (torrent_hash_v1) DO UPDATE SET
-                 title = EXCLUDED.title,
-                 category = EXCLUDED.category",
-        )
-        .map_err(|e| format!("准备种子更新语句失败: {e:?}"))?;
-    let file_statement = transaction
-        .prepare(
-            "INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
-             VALUES ($1, $2)
-             ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING",
-        )
-        .map_err(|e| format!("准备种子文件插入语句失败: {e:?}"))?;
+    // 准备插入业务语句
+    let mut transaction = client.transaction().map_err(|e| format!("开始更新种子事务失败: {e:?}"))?;
+    let torrent_statement = transaction.prepare(
+        "INSERT INTO public.torrent (torrent_hash_v1, title, category)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (torrent_hash_v1) DO UPDATE SET
+                title = EXCLUDED.title,
+                category = EXCLUDED.category",
+    )
+    .map_err(|e| format!("准备种子更新语句失败: {e:?}"))?;
+    let file_statement = transaction.prepare(
+        "INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
+            VALUES ($1, $2)
+            ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING",
+    )
+    .map_err(|e| format!("准备种子文件插入语句失败: {e:?}"))?;
 
+    // 遍历种子信息并更新数据库记录
     for torrent_info in torrent_infos {
+
         let hash = hex::encode(torrent_info.hash_v1);
-        transaction
-            .execute(
-                &torrent_statement,
-                &[&hash, &torrent_info.title, &torrent_info.category],
-            )
-            .map_err(|e| format!("更新种子 {hash} 失败: {e:?}"))?;
+        transaction.execute(
+            &torrent_statement,
+            &[&hash, &torrent_info.title, &torrent_info.category],
+        )
+        .map_err(|e| format!("更新种子 {hash} 失败: {e:?}"))?;
 
         let files: Vec<TorrentFileInfo> = match &torrent_info.files_info {
             Some(f) => f.clone(),
@@ -143,13 +144,13 @@ fn update_postgres(
             let relative_path = file.relative_path.to_str().ok_or_else(|| format!("种子 {hash} 的文件信息缺少有效的 relative_path"))?;
             // 文件的两个指定字段均为联合主键, 冲突时保留已有记录及 sha256.
             transaction.execute(&file_statement, &[&hash, &relative_path])
-                .map_err(|e| format!("插入种子文件 {}/{} 失败: {:?}", hash, relative_path, e))?;
+            .map_err(|e| format!("插入种子文件 {}/{} 失败: {:?}", hash, relative_path, e))?;
         }
     }
 
-    transaction
-        .commit()
-        .map_err(|e| format!("提交种子更新事务失败: {e:?}"))?;
+    // 提交事务, 确保所有更新操作一起生效
+    transaction.commit().map_err(|e| format!("提交种子更新事务失败: {e:?}"))?;
+
     Ok(())
 }
 

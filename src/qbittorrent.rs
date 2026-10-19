@@ -78,6 +78,11 @@ pub struct TorrentInfo {
 
 
 impl TorrentInfo {
+
+    pub fn get_file_count(&self) -> usize {
+        self.files_info.as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+
     pub fn set_files_info_from_json(&mut self, file_infos: &serde_json::Value) -> Result<(), String> {
 
         if self.files_info.is_some() { return Err("files_info 已经存在".to_string()); }
