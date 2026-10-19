@@ -10,6 +10,46 @@
 //! 2. session.get(f"{QBITTORRENT_URL}/api/v2/torrents/files?hash={hash}")
 //! 3. 打印相关信息
 
+use std::env;
+
+
+const QB_URL: &str = "QBITTORRENT_URL";
+const PORT: &str = "PORT";
+const QB_USERNAME: &str = "QB_USERNAME";
+const QB_PASSWORD: &str = "QB_PASSWORD";
+
+
+struct QbConfig {
+    url: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+impl QbConfig {
+    fn from_env() -> Result<Self, String> {
+
+        dotenvy::dotenv().ok(); // 加载 .env 文件, 将配置写入进程环境变量
+
+        // 读取字符串类型的环境变量
+        let url = env::var(QB_URL).map_err(|e| eprintln!("获取 {} 失败: {}", QB_URL, e)).ok();
+        let port = env::var(PORT).ok().and_then(|p| p.parse::<u16>().map_err(|e| eprintln!("获取 {} 失败: {}", PORT, e)).ok());
+        let username = env::var(QB_USERNAME).map_err(|e| eprintln!("获取 {} 失败: {}", QB_USERNAME, e)).ok();
+        let password = env::var(QB_PASSWORD).map_err(|e| eprintln!("获取 {} 失败: {}", QB_PASSWORD, e)).ok();
+
+        Ok(Self {url, port, username, password})
+    }
+
+    fn print_self(&self) {
+        println!("QbConfig {{");
+        println!("    url: {:?}", self.url);
+        println!("    port: {:?}", self.port);
+        println!("    username: {:?}", self.username);
+        println!("    password: {}", if self.password.is_some() { "*****" } else { "null" });
+        println!("}}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -18,12 +58,12 @@ fn main() {
     }
     let hash = &args[1];
 
-    let qbt_url = std::env::var("QBITTORRENT_URL").expect("请设置 QBITTORRENT_URL 环境变量");
-    let qb_username = std::env::var("QB_USERNAME").expect("请设置 QB_USERNAME 环境变量");
-    let qb_password = std::env::var("QB_PASSWORD").expect("请设置 QB_PASSWORD 环境变量");
-    println!("QBITTORRENT_URL: {}", qbt_url);
-    println!("QB_USERNAME: {}", qb_username);
-    println!("QB_PASSWORD: *****");
+    let config = QbConfig::from_env().expect("从环境变量获取配置失败");
+    config.print_self();
+
+    let qbt_url = config.url.expect("请设置 QBITTORRENT_URL 环境变量");
+    let qb_username = config.username.expect("请设置 QB_USERNAME 环境变量");
+    let qb_password = config.password.expect("请设置 QB_PASSWORD 环境变量");
 
     // 登录
     let client = reqwest::blocking::Client::builder()
