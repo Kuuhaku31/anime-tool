@@ -19,7 +19,6 @@ pub struct QbConfig {
 
 impl QbConfig {
     pub fn from_env() -> Result<Self, String> {
-        dotenvy::dotenv().ok(); // 加载 .env 文件, 将配置写入进程环境变量
 
         // 读取字符串类型的环境变量
         let url = env::var(QB_URL)

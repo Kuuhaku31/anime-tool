@@ -17,14 +17,24 @@ fn main() {
 }
 
 // 登录 qBittorrent, 获取全部种子及文件信息, 最后统一写入数据库.
-fn run() -> Result<()> {
+fn run() -> Result<(), String> {
+
+    // 输出当前工作目录, 用于排查 .env 文件定位问题.
+    let cwd = env::current_dir().map_err(|e| format!("获取当前工作目录失败: {e}"))?;
+    eprintln!("当前工作目录: {}", cwd.display());
+
+    // 显示 .env 文件的实际加载结果.
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("已加载配置文件: {}", path.display()),
+        Err(e) => eprintln!("加载 .env 失败: {e}"),
+    }
 
     // 加载配置
-    let config = QbConfig::from_env().map_err(anyhow::Error::msg)?;
-    let url = config.url.context("请设置 QBITTORRENT_URL 环境变量")?;
+    let config = QbConfig::from_env().map_err(anyhow::Error::msg).map_err(|e| e.to_string())?;
+    let url = config.url.context("请设置 QBITTORRENT_URL 环境变量").map_err(|e| e.to_string())?;
     let url = url.trim_end_matches('/');
-    let username = config.username.context("请设置 QB_USERNAME 环境变量")?;
-    let password = config.password.context("请设置 QB_PASSWORD 环境变量")?;
+    let username = config.username.context("请设置 QB_USERNAME 环境变量").map_err(|e| e.to_string())?;
+    let password = config.password.context("请设置 QB_PASSWORD 环境变量").map_err(|e| e.to_string())?;
     println!("使用的 qBittorrent URL: {}", url);
     println!("使用的 QB_USERNAME: {}", username);
     println!("使用的 QB_PASSWORD: {}", if password.is_empty() { "未设置" } else { "*****" });
@@ -32,17 +42,18 @@ fn run() -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .cookie_store(true)
         .build()
-        .context("创建 HTTP 客户端失败")?;
+        .context("创建 HTTP 客户端失败")
+        .map_err(|e| e.to_string())?;
     let _ = client
         .post(format!("{url}/api/v2/auth/login"))
         .form(&[("username", &username), ("password", &password)])
         .send()
-        .context("请求 qBittorrent 登录失败")?
+        .context("请求 qBittorrent 登录失败").map_err(|e| e.to_string())?
         .error_for_status()
-        .context("qBittorrent 登录返回错误状态")?;
+        .context("qBittorrent 登录返回错误状态").map_err(|e| e.to_string())?;
 
     // 获取种子信息列表
-    let mut torrent_infos = get_torrents_info(&client, url)?;
+    let mut torrent_infos = get_torrents_info(&client, url).map_err(|e| e.to_string())?;
     println!("获取种子信息数量: {}", torrent_infos.len());
 
     // 顺序请求每个种子的文件列表和种子文件数据, 全部获取成功后才开始写库.
@@ -58,14 +69,14 @@ fn run() -> Result<()> {
     for torrent_info in &mut torrent_infos {
         let hash = hex::encode(torrent_info.hash_v1);
         let files = client
-            .get(format!("{url}/api/v2/torrents/files"))
-            .query(&[("hash", &hash)])
-            .send()
-            .with_context(|| format!("请求种子 {hash} 的文件列表失败"))?
-            .error_for_status()
-            .with_context(|| format!("种子 {hash} 的文件列表返回错误状态"))?
-            .json::<serde_json::Value>()
-            .with_context(|| format!("解析种子 {hash} 的文件列表响应失败"))?;
+        .get(format!("{url}/api/v2/torrents/files"))
+        .query(&[("hash", &hash)])
+        .send()
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .map_err(|e| e.to_string())?;
 
         // 请求导出接口.
         let url = format!("{url}/api/v2/torrents/export");
@@ -73,11 +84,11 @@ fn run() -> Result<()> {
             .get(&url)
             .query(&[("hash", &hash)])
             .send()
-            .with_context(|| format!("请求种子 {hash} 的种子文件数据失败"))?
+            .map_err(|e| e.to_string())?
             .error_for_status()
-            .with_context(|| format!("种子 {hash} 的种子文件数据返回错误状态"))?
+            .map_err(|e| e.to_string())?
             .bytes()
-            .with_context(|| format!("解析种子 {hash} 的种子文件数据响应失败"))?
+            .map_err(|e| e.to_string())?
             .to_vec();
 
         torrent_info.torrent_file_data = Some(response);
@@ -85,7 +96,8 @@ fn run() -> Result<()> {
         torrent_info
             .set_files_info_from_json(&files)
             .map_err(anyhow::Error::msg)
-            .with_context(|| format!("设置种子 {hash} 的文件信息失败"))?;
+            .with_context(|| format!("设置种子 {hash} 的文件信息失败"))
+            .map_err(|e| e.to_string())?;
         pb.inc(1); // 更新进度条位置
     }
     pb.finish_with_message("所有种子文件信息获取完成"); // 完成进度条显示
@@ -97,10 +109,10 @@ fn run() -> Result<()> {
     }
     println!("获取的文件总数量: {}", total_file_count);
 
-    let mut connection = connect_postgres()?;
+    let mut connection = connect_postgres().map_err(|e| e.to_string())?;
 
     // 更新种子信息到数据库.
-    update_postgres(&mut connection, &torrent_infos).map_err(anyhow::Error::msg)?;
+    update_postgres(&mut connection, &torrent_infos).map_err(|e| e.to_string())?;
     println!("同步种子信息完成: {} 个种子", torrent_infos.len());
 
     // TODO
