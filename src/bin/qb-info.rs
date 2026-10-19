@@ -2,11 +2,18 @@
 //! src/bin/qb-info.rs
 //! 顺序获取 qBittorrent 种子及文件信息, 并同步指定字段到 PostgreSQL.
 
-use std::env;
+use std::fs::File;
+use std::{env, path::PathBuf};
 
 use anime_tool::qbittorrent::{QbConfig, TorrentInfo};
 use anyhow::{Context, Result};
 use indicatif::ProgressStyle;
+use hex;
+use sha2::{Digest, Sha256};
+
+type HashV1 = [u8; 20];
+#[allow(dead_code)]
+type HashSha256 = [u8; 32];
 
 // 执行同步流程并在失败时输出完整错误链.
 fn main() {
@@ -59,11 +66,8 @@ fn run() -> Result<(), String> {
     // 顺序请求每个种子的文件列表和种子文件数据, 全部获取成功后才开始写库.
     let pb = indicatif::ProgressBar::new(torrent_infos.len() as u64); // 创建总长度为种子数量的进度条.
     pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}"
-        )
-        .unwrap()
-        .progress_chars("##-"),
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}")
+        .unwrap().progress_chars("##-"),
     );
     pb.set_position(0); // 初始化进度条位置为 0
     for torrent_info in &mut torrent_infos {
@@ -109,13 +113,172 @@ fn run() -> Result<(), String> {
     }
     println!("获取的文件总数量: {}", total_file_count);
 
+
+    // ======================== //
+    // 连接到 PostgreSQL 数据库 //
+    // ======================== //
     let mut connection = connect_postgres().map_err(|e| e.to_string())?;
 
     // 更新种子信息到数据库.
     update_postgres(&mut connection, &torrent_infos).map_err(|e| e.to_string())?;
     println!("同步种子信息完成: {} 个种子", torrent_infos.len());
 
-    // TODO
+    // 查询输入文件列表中, 数据库记录的 sha256 尚未计算的文件.
+    let mut missing_files = find_files_missing_sha256(&mut connection, &torrent_infos)
+        .map_err(|e| format!("查询 sha256 缺失的文件失败: {e}"))?;
+    println!("数据库中 sha256 缺失的文件数量: {}", missing_files.len());
+
+    // 构建需要重新计算 sha256 的文件绝对路径
+    for file in &mut missing_files {
+        let torrent_info = torrent_infos.iter().find(|t| t.hash_v1 == file.torrent_hash_v1);
+        if let Some(torrent_info) = torrent_info {
+            if let Some(base_path) = &torrent_info.save_path {
+                let absolute_path = base_path.join(&file.relative_path);
+                file.absolute_path = Some(absolute_path);
+            }
+        }
+    }
+    // 输出需要重新计算 sha256 的文件绝对路径示例
+    for file in missing_files.iter().take(20) {
+        if let Some(absolute_path) = &file.absolute_path {
+            println!("待计算 sha256 的文件绝对路径: {}", absolute_path.display());
+        }
+    }
+    if missing_files.len() > 20 { println!("其余 {} 个文件未显示", missing_files.len() - 20);}
+
+    // 计算缺失的 sha256, 并插入更新数据库
+    let pb = indicatif::ProgressBar::new(missing_files.len() as u64); // 创建总长度为种子数量的进度条.
+    pb.set_style(
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}")
+        .unwrap().progress_chars("##-"),
+    );
+    pb.set_position(0); // 初始化进度条位置为 0
+    for file in &missing_files {
+        if let Some(path) = &file.absolute_path {
+            let mut f = File::open(path).map_err(|e| e.to_string())?;
+            let mut hasher = Sha256::new();
+
+            std::io::copy(&mut f, &mut hasher).map_err(|e| e.to_string())?;
+            let sha256_result = hasher.finalize();
+            let sha256_hex = hex::encode(sha256_result);
+
+            // 插入或更新数据库中的 sha256
+            let sha256_hex = sha256_hex;
+            let torrent_hash_v1 = hex::encode(&file.torrent_hash_v1);
+            let relative_path = &file.relative_path.to_string_lossy();
+            connection.execute(
+                "UPDATE public.torrent_file SET sha256 = $1 WHERE torrent_hash_v1 = $2 AND relative_path = $3",
+                &[&sha256_hex, &torrent_hash_v1, &relative_path],
+            ).map_err(|e| e.to_string())?;
+        }
+        pb.inc(1); // 更新进度条位置
+    }
+    pb.finish_with_message("计算 sha256 完成");
+
+    Ok(())
+}
+
+// 表示数据库中尚未计算 sha256 的种子文件.
+#[derive(Debug)]
+struct MissingSha256File {
+    torrent_hash_v1: HashV1,
+    relative_path: PathBuf,
+    absolute_path: Option<PathBuf>,
+}
+
+// 从数据库查找输入文件列表中 sha256 缺失的记录, 使用批量查询避免逐文件访问数据库.
+fn find_files_missing_sha256(
+    client: &mut postgres::Client,
+    torrent_infos: &[TorrentInfo],
+) -> Result<Vec<MissingSha256File>, String> {
+    // 每批查询的文件数量; SQL 参数始终只有两个数组, 不受单条参数数量限制影响.
+    const BATCH_SIZE: usize = 1000;
+
+    if torrent_infos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 仅返回 files_info 中存在, 且数据库对应记录的 sha256 为 NULL 的文件.
+    let statement = client
+        .prepare(
+            r#"
+            SELECT DISTINCT tf.torrent_hash_v1, tf.relative_path
+            FROM public.torrent_file AS tf
+            INNER JOIN UNNEST($1::TEXT[], $2::TEXT[])
+                AS input(torrent_hash_v1, relative_path)
+                ON tf.torrent_hash_v1 = input.torrent_hash_v1
+                AND tf.relative_path = input.relative_path
+            WHERE tf.sha256 IS NULL
+            ORDER BY tf.torrent_hash_v1, tf.relative_path
+            "#,
+        )
+        .map_err(|e| format!("准备查询 sha256 缺失文件的语句失败: {e:?}"))?;
+
+    let mut hashes: Vec<String> = Vec::with_capacity(BATCH_SIZE);
+    let mut paths: Vec<String> = Vec::with_capacity(BATCH_SIZE);
+    let mut missing_files = Vec::new();
+
+    // 分批收集 hash 和相对路径, 并批量查询数据库.
+    for torrent_info in torrent_infos {
+        let hash = hex::encode(torrent_info.hash_v1);
+
+        if let Some(files) = &torrent_info.files_info {
+            for file in files {
+                let relative_path = &file.relative_path;
+
+                hashes.push(hash.clone());
+                paths.push(relative_path.to_string_lossy().into_owned());
+
+                if hashes.len() >= BATCH_SIZE {
+                    append_missing_sha256_batch(
+                        client,
+                        &statement,
+                        &hashes,
+                        &paths,
+                        &mut missing_files,
+                    )?;
+                    hashes.clear();
+                    paths.clear();
+                }
+            }
+        }
+    }
+
+    // 查询最后一批不足 BATCH_SIZE 的文件.
+    if !hashes.is_empty() {
+        append_missing_sha256_batch(
+            client,
+            &statement,
+            &hashes,
+            &paths,
+            &mut missing_files,
+        )?;
+    }
+
+    Ok(missing_files)
+}
+
+// 执行一批 sha256 缺失文件查询, 并将结果添加到输出列表.
+fn append_missing_sha256_batch(
+    client: &mut postgres::Client,
+    statement: &postgres::Statement,
+    hashes: &[String],
+    paths: &[String],
+    missing_files: &mut Vec<MissingSha256File>,
+) -> Result<(), String> {
+    let rows = client
+        .query(statement, &[&hashes, &paths])
+        .map_err(|e| format!("查询 sha256 缺失文件失败: {e:?}"))?;
+
+    missing_files.extend(rows.into_iter().map(|row| {
+        let hash_str: String = row.get(0);
+        let hash: HashV1 = hex::decode(&hash_str).unwrap().try_into().unwrap();
+        let relative_path: PathBuf = PathBuf::from(row.get::<_, String>(1));
+        MissingSha256File {
+        torrent_hash_v1: hash,
+        relative_path,
+        absolute_path: None,
+    }}));
 
     Ok(())
 }

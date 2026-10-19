@@ -64,14 +64,14 @@ impl QbConfig {
 #[derive(Clone)]
 pub struct TorrentFileInfo {
     pub relative_path: PathBuf,
-    progress_complete: bool,
+    pub progress_complete: bool,
 }
 
 pub struct TorrentInfo {
     pub hash_v1: [u8; 20], // primary key
     pub category: Option<String>,
     pub title: Option<String>,
-    save_path: Option<PathBuf>,
+    pub save_path: Option<PathBuf>,
 
     pub torrent_file_data: Option<Vec<u8>>,
     pub files_info: Option<Vec<TorrentFileInfo>>,
