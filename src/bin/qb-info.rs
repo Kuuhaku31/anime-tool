@@ -17,6 +17,68 @@ const PORT: &str = "PORT";
 const QB_USERNAME: &str = "QB_USERNAME";
 const QB_PASSWORD: &str = "QB_PASSWORD";
 
+const PG_URL: &str = "POSTGRESQL_URL";
+const PG_PORT: &str = "POSTGRESQL_PORT";
+const PG_USERNAME: &str = "POSTGRESQL_USERNAME";
+const PG_PASSWORD: &str = "POSTGRESQL_PASSWORD";
+const PG_DATABASE: &str = "POSTGRESQL_DATABASE";
+
+struct PgConfig {
+    url: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    password: Option<String>,
+    database: Option<String>,
+}
+
+impl PgConfig {
+    fn from_env() -> Result<Self, String> {
+        dotenvy::dotenv().ok(); // 加载 .env 文件, 将配置写入进程环境变量
+
+        let url = env::var(PG_URL)
+            .map_err(|e| eprintln!("获取 {} 失败: {}", PG_URL, e))
+            .ok();
+        let port = env::var(PG_PORT).ok().and_then(|p| {
+            p.parse::<u16>()
+                .map_err(|e| eprintln!("获取 {} 失败: {}", PG_PORT, e))
+                .ok()
+        });
+        let username = env::var(PG_USERNAME)
+            .map_err(|e| eprintln!("获取 {} 失败: {}", PG_USERNAME, e))
+            .ok();
+        let password = env::var(PG_PASSWORD)
+            .map_err(|e| eprintln!("获取 {} 失败: {}", PG_PASSWORD, e))
+            .ok();
+        let database = env::var(PG_DATABASE)
+            .map_err(|e| eprintln!("获取 {} 失败: {}", PG_DATABASE, e))
+            .ok();
+
+        Ok(Self {
+            url,
+            port,
+            username,
+            password,
+            database,
+        })
+    }
+
+    fn print_self(&self) {
+        println!("PgConfig {{");
+        println!("    url: {:?}", self.url);
+        println!("    port: {:?}", self.port);
+        println!("    username: {:?}", self.username);
+        println!(
+            "    password: {}",
+            if self.password.is_some() {
+                "*****"
+            } else {
+                "null"
+            }
+        );
+        println!("}}");
+    }
+}
+
 struct QbConfig {
     url: Option<String>,
     port: Option<u16>,
@@ -242,4 +304,27 @@ fn main() {
         "Torrent 信息: {}",
         serde_json::to_string_pretty(&torrent_info.to_json()).expect("格式化 JSON 失败")
     );
+
+    // 测试 PostgreSQL 配置
+    let pg_config = PgConfig::from_env().expect("从环境变量获取 PostgreSQL 配置失败");
+    pg_config.print_self();
+
+    // 连接数据库
+    let mut pg_connection = postgres::Client::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            pg_config.url.expect("请设置 POSTGRESQL_URL 环境变量"),
+            pg_config.port.expect("请设置 POSTGRESQL_PORT 环境变量"),
+            pg_config.username.expect("请设置 POSTGRESQL_USERNAME 环境变量"),
+            pg_config.password.expect("请设置 POSTGRESQL_PASSWORD 环境变量"),
+            pg_config.database.expect("请设置 POSTGRESQL_DATABASE 环境变量")
+        ),
+        postgres::NoTls,
+    )
+    .expect("连接 PostgreSQL 数据库失败");
+    // 打印表
+    for row in pg_connection.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'", &[]).expect("查询表失败") {
+        let table_name: &str = row.get(0);
+        println!("表名: {}", table_name);
+    }
 }
