@@ -73,6 +73,8 @@ pub struct TorrentInfo {
     pub category: Option<String>,
     pub title: Option<String>,
     save_path: Option<PathBuf>,
+
+    pub torrent_file_data: Option<Vec<u8>>,
     pub files_info: Option<Vec<TorrentFileInfo>>,
 }
 
@@ -129,6 +131,7 @@ impl TorrentInfo {
             category,
             save_path,
             title,
+            torrent_file_data: None,
             files_info: None,
         })
     }
@@ -152,6 +155,7 @@ impl TorrentInfo {
             "category": category_str,
             "title": title_str,
             "save_path": save_path_str,
+            "torrent_file_data_size": self.torrent_file_data.as_ref().map(|data| data.len()).unwrap_or(0),
             "files_info": self.files_info.as_ref().map(|file_infos| {
                 file_infos.iter().map(|f| {
                     serde_json::json!({

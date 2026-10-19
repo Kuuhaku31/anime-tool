@@ -44,7 +44,7 @@ fn run() -> Result<()> {
     let mut torrent_infos = get_torrents_info(&client, url)?;
     println!("获取种子信息数量: {}", torrent_infos.len());
 
-    // 顺序请求每个种子的文件列表, 全部获取成功后才开始写库.
+    // 顺序请求每个种子的文件列表和种子文件数据, 全部获取成功后才开始写库.
     for torrent_info in &mut torrent_infos {
         let hash = hex::encode(torrent_info.hash_v1);
         let files = client
@@ -56,6 +56,21 @@ fn run() -> Result<()> {
             .with_context(|| format!("种子 {hash} 的文件列表返回错误状态"))?
             .json::<serde_json::Value>()
             .with_context(|| format!("解析种子 {hash} 的文件列表响应失败"))?;
+
+        // 请求导出接口.
+        let url = format!("{url}/api/v2/torrents/export");
+        let response = client
+            .get(&url)
+            .query(&[("hash", &hash)])
+            .send()
+            .with_context(|| format!("请求种子 {hash} 的种子文件数据失败"))?
+            .error_for_status()
+            .with_context(|| format!("种子 {hash} 的种子文件数据返回错误状态"))?
+            .bytes()
+            .with_context(|| format!("解析种子 {hash} 的种子文件数据响应失败"))?
+            .to_vec();
+
+        torrent_info.torrent_file_data = Some(response);
 
         torrent_info
             .set_files_info_from_json(&files)
@@ -71,8 +86,13 @@ fn run() -> Result<()> {
     println!("获取的文件总数量: {}", total_file_count);
 
     let mut connection = connect_postgres()?;
+
+    // 更新种子信息到数据库.
     update_postgres(&mut connection, &torrent_infos).map_err(anyhow::Error::msg)?;
     println!("同步种子信息完成: {} 个种子", torrent_infos.len());
+
+    // TODO
+
     Ok(())
 }
 
@@ -102,7 +122,7 @@ fn get_torrents_info(
         .collect()
 }
 
-// 仅插入或更新种子标识, 标题, 分类及文件标识和相对路径.
+// 插入或更新种子标识, 标题, 分类, 文件数据及文件标识和相对路径.
 fn update_postgres(
     client: &mut postgres::Client,
     torrent_infos: &[TorrentInfo],
@@ -121,17 +141,18 @@ fn update_postgres(
     // 使用 DISTINCT ON 处理同一批次中的重复 hash, 保留最后一次出现的记录.
     let torrent_statement = transaction.prepare(
         r#"
-        INSERT INTO public.torrent (torrent_hash_v1, title, category)
-        SELECT torrent_hash_v1, title, category
+        INSERT INTO public.torrent (torrent_hash_v1, title, category, data)
+        SELECT torrent_hash_v1, title, category, data
         FROM (
-            SELECT DISTINCT ON (torrent_hash_v1) torrent_hash_v1, title, category
-            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[])
-            WITH ORDINALITY AS input(torrent_hash_v1, title, category, ord)
+            SELECT DISTINCT ON (torrent_hash_v1) torrent_hash_v1, title, category, data
+            FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[], $4::BYTEA[])
+            WITH ORDINALITY AS input(torrent_hash_v1, title, category, data, ord)
             ORDER BY torrent_hash_v1, ord DESC
         ) AS latest
         ON CONFLICT (torrent_hash_v1) DO UPDATE SET
             title = EXCLUDED.title,
-            category = EXCLUDED.category
+            category = EXCLUDED.category,
+            data = EXCLUDED.data
         "#,
     ).map_err(|e| format!("准备种子批量更新语句失败: {e:?}"))?;
 
@@ -154,11 +175,12 @@ fn update_postgres(
         let hashes: Vec<_> = chunk.iter().map(|i| hex::encode(i.hash_v1)).collect();
         let titles: Vec<_> = chunk.iter().map(|i| i.title.clone()).collect();
         let categories: Vec<_> = chunk.iter().map(|i| i.category.clone()).collect();
+        let data_s: Vec<_> = chunk.iter().map(|i| i.torrent_file_data.as_deref().unwrap_or(&[])).collect();
 
         // 一次请求更新整批种子.
         transaction.execute(
             &torrent_statement,
-            &[&hashes, &titles, &categories],
+            &[&hashes, &titles, &categories, &data_s],
         ).map_err(|e| format!("批量更新种子失败: {e:?}"))?;
     }
 
