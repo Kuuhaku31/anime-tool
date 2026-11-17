@@ -7,6 +7,8 @@
 
 - [Torrent 表结构](docs/torrent-schema.md): `public.torrent` 和 `public.torrent_file`
   的字段, 约束, 索引, 关联关系和建表 SQL.
+- [Bangumi 表结构](docs/bangumi-schema.md): `public.bangumi_anime` 和
+  `public.bangumi_episode` 的字段, 约束, 级联关系, 索引和建表 SQL.
 
 ## 功能
 
@@ -156,6 +158,22 @@ Tab 分隔时保留空列, 缺失的可选 ID 写入 NULL; 也接受空格分隔
 第一列必填, 非空 ID 必须是正的 32 位整数. 空行和以 `#` 开头的行会跳过,
 重复记录原样保留. 文件中的所有行通过校验后, 才在同一事务中清空旧记录
 并批量写入; 失败时回滚. 空文件或仅含空行及注释的文件会清空表.
+
+### Bangumi 动画和剧集同步
+
+运行 `cargo run --bin bgm`, 从 PostgreSQL `main.public.ids.bgm_ani_id`
+读取非 NULL 且去重排序后的 ID, 请求 Bangumi subject 和完整 episode 分页,
+再刷新 `public.bangumi_anime` 和 `public.bangumi_episode`.
+需要设置 `PG_HOST`, `PG_USER`, `PG_PASSWORD`, 可选 `PG_PORT`.
+API 配置可用 `BANGUMI_API_BASE` (默认 `https://api.bgm.tv`),
+`REQUEST_TIMEOUT` (默认 15 秒) 和 `REQUEST_DELAY` (默认 0.2 秒).
+支持当前目录 `.env`, 进程环境变量优先, 数据库固定为 `main`.
+
+每个动画独立事务, 单个 ID 同步失败会回滚该动画并继续处理其他 ID,
+最终有失败时返回非零退出码. 已有动画和剧集按 Bangumi ID 更新,
+刷新 `update_at`, 不删除 API 本次未返回的历史剧集.
+特别注意: 数据库 `bangumi_episode.ep` 为 text, 映射 API `episode.sort`;
+数据库 `bangumi_episode.sort` 为 smallint, 映射 API `episode.ep`, 不是同名映射.
 
 ### qBittorrent 数据同步
 
