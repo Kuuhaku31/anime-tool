@@ -91,9 +91,15 @@ fn run() -> Result<()> {
             ("password", &config.qb_password),
         ]).send()
         .context("请求 qBittorrent 登录失败")?.error_for_status()
-        .context("qBittorrent 登录返回错误状态")?.text()
+        .context("qBittorrent 登录返回错误状态")?;
+        let status = response.status();
+        let body = response.text()
         .context("读取 qBittorrent 登录结果失败")?;
-        if response.trim() != "Ok." { bail!("qBittorrent 登录被拒绝"); }
+
+        // 兼容新版的 204 空响应和旧版的 200 Ok.
+        if status != reqwest::StatusCode::NO_CONTENT
+        && !(status == reqwest::StatusCode::OK && body.trim() == "Ok.")
+        { bail!("qBittorrent 登录被拒绝, HTTP 状态: {status}"); }
 
         client
     };
