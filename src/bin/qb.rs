@@ -177,9 +177,6 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
         let title = json_string(&value, "name")?.to_owned();
         let category = PathBuf::from(json_string(&value, "category")?);
         let save_path = PathBuf::from(json_string(&value, "save_path")?);
-        if !save_path.is_absolute() {
-            bail!("种子 {hash_text} 的保存路径不是绝对路径: {}", save_path.display());
-        }
 
         // 获取种子文件列表
         let files_json: Vec<Value> = client
@@ -202,7 +199,8 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
             || path.components().any(|part| !matches!(part, Component::Normal(_)))
             { bail!("无效的种子相对路径: {text}"); }
 
-            files.push((save_path.join(&relative_path), relative_path));
+            let absolute_path = save_path.join(&relative_path);
+            files.push((relative_path, absolute_path));
         }
 
         // 获取种子文件本体
