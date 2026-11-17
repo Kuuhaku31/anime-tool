@@ -59,6 +59,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "clap",
  "csv",
  "dirs",
@@ -70,6 +71,7 @@ dependencies = [
  "postgres",
  "regex",
  "reqwest",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1560,6 +1562,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

@@ -126,6 +126,24 @@ render-ass 123456 \
 - `--version | -v` 显示版本信息
 - `--help | -h` 显示帮助信息, 不执行任何操作
 
+### 蜜柑 RSS 同步
+
+运行 `cargo run --bin mikan`, 从 PostgreSQL `main.ids.mikan_rss_id` 读取
+非 NULL 且去重排序后的 ID, 顺序请求 RSS, 更新 `mikan_rss` 和 `mikan_torrent`.
+数据库使用 `PG_HOST`, `PG_USER`, `PG_PASSWORD`, 可选 `PG_PORT`,
+固定连接 `main`, 不使用 `PG_DB`. 支持当前目录的 `.env`, 进程环境变量优先.
+
+请求配置沿用旧项目: `MIKAN_RSS_BASE` 默认为 `https://mikanani.me/RSS/Bangumi`,
+`REQUEST_TIMEOUT` 默认为 15 秒, `REQUEST_DELAY` 默认为 0.2 秒.
+显示订阅进度, 每个订阅先完整解析再独立事务写库, 先更新订阅再逐条更新种子.
+同 hash 的后续条目覆盖之前的记录, 不删除已有种子, 不下载 torrent 文件,
+也不使用旧脚本的本地 RSS 缓存.
+
+无时区的发布时间按 UTC+8 解释, 带时区的时间保留其实际时刻.
+单个订阅失败会报告并继续处理, 最后如有失败则返回非零退出码,
+已成功订阅的数据保持提交. 表结构使用实际 `main` 库结构,
+不自动创建或修改数据库表.
+
 ### PostgreSQL ID 列表覆盖导入
 
 运行 `cargo run --bin set-ids -- /mnt/C/ani/ids.txt`, 将文本文件覆盖到
