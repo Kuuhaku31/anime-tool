@@ -131,8 +131,7 @@ CREATE TABLE public.torrent_file (
 
 ## 5. 使用注意事项
 
-- `qb-info` 使用单个事务先写入种子再写入文件. 种子冲突时仅更新 `title` 和 `category`,
-  文件冲突时不做修改. 不更新 `data`, 大小, 计数或 `sha256`, 也不删除已有记录.
+- 本文记录的是旧版 `appdb` 表结构, 不适用于 `qb` 使用的 `main` 库结构.
 - `title` 和 `category` 为缺失值时会写入 NULL, 包括覆盖数据库中的已有值.
 - `torrent_hash_v1` 存储的是文本, 不是 `bytea`. 二进制 hash 需要先编码成十六进制文本再比较.
 - `VARCHAR(40)` 和 `VARCHAR(64)` 只限制最大长度, 不保证恰好 40 或 64 个字符,

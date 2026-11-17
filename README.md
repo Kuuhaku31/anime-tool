@@ -126,16 +126,26 @@ render-ass 123456 \
 - `--version | -v` 显示版本信息
 - `--help | -h` 显示帮助信息, 不执行任何操作
 
-### qBittorrent 缺失 hash 查询
+### qBittorrent 数据同步
 
-`qb-info` 从 qBittorrent 获取种子列表, 并输出 PostgreSQL 中尚未保存的 v1 hash.
-需要设置 `QBITTORRENT_URL`, `QB_USERNAME`, `QB_PASSWORD` 以及
-`POSTGRESQL_URL`, `POSTGRESQL_PORT`, `POSTGRESQL_USERNAME`,
-`POSTGRESQL_PASSWORD`, `POSTGRESQL_DATABASE` 环境变量, 也支持从 `.env` 加载.
+`qb` 从 qBittorrent 获取种子及文件信息, 同步 PostgreSQL 的 `in_qb`,
+`torrent`, `torrent_file`, `file` 和 `path_file` 表. 缺少路径索引的文件会
+计算 SHA-256 和前 16 MiB 的 MD5; 无法读取的文件会报告并跳过.
+文件路径必须能在运行程序的机器上访问. 数据库要求文件大小大于 0,
+因此空文件也会报告并跳过.
 
-查询使用 `public.torrent.torrent_hash_v1` 列, 类型为 `VARCHAR(40)`,
-存储小写的 40 位十六进制 hash, 而非 `BYTEA`.
-数据库查询失败时会输出 PostgreSQL 错误消息及 SQLSTATE, 便于排查表结构或权限问题.
+需要设置 `QB_URL`, `QB_USERNAME`, `QB_PASSWORD`, `PG_HOST`, `PG_USER`,
+`PG_PASSWORD`, `PG_DB`; `QB_PORT` 和 `PG_PORT` 可省略.
+也支持从当前目录的 `.env` 加载, 已有环境变量优先. 数据库需要使用
+`main` 的二进制 hash 表结构, 并包含以下结构:
+
+```sql
+CREATE TABLE public.in_qb (
+    torrent_hash_v1 bytea PRIMARY KEY CHECK (octet_length(torrent_hash_v1) = 20)
+);
+ALTER TABLE public.file ADD COLUMN pre16mib_md5 bytea
+    CHECK (pre16mib_md5 IS NULL OR octet_length(pre16mib_md5) = 16);
+```
 
 ## ASS 渲染规则
 
