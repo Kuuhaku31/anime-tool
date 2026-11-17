@@ -126,6 +126,19 @@ render-ass 123456 \
 - `--version | -v` 显示版本信息
 - `--help | -h` 显示帮助信息, 不执行任何操作
 
+### PostgreSQL ID 列表覆盖导入
+
+运行 `cargo run --bin set-ids -- /mnt/C/ani/ids.txt`, 将文本文件覆盖到
+PostgreSQL `main.public.ids` 表. 需要设置 `PG_HOST`, `PG_USER`, `PG_PASSWORD`,
+可选 `PG_PORT`, 支持当前目录的 `.env`, 已有环境变量优先.
+数据库固定为 `main`, 不使用 `PG_DB`.
+
+输入列顺序为 `bgm_id`, `mikan_id`, `ddp_id`, 与数据库字段排列顺序不同.
+Tab 分隔时保留空列, 缺失的可选 ID 写入 NULL; 也接受空格分隔的连续列.
+第一列必填, 非空 ID 必须是正的 32 位整数. 空行和以 `#` 开头的行会跳过,
+重复记录原样保留. 文件中的所有行通过校验后, 才在同一事务中清空旧记录
+并批量写入; 失败时回滚. 空文件或仅含空行及注释的文件会清空表.
+
 ### qBittorrent 数据同步
 
 `qb` 从 qBittorrent 获取种子及文件信息, 同步 PostgreSQL 的 `in_qb`,
