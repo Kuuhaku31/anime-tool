@@ -249,7 +249,10 @@ fn fetch_feed(client: &HttpClient, base: &Url, id: i32) -> Result<Feed> {
         for (index, item) in channel.children().filter(|node| node.has_tag_name("item")).enumerate() {
             torrents.push(parse_item(item).with_context(|| format!("解析 item[{}] 失败", index + 1))?);
         }
-        Ok(Feed { title: child_text(channel, "title", None), torrents })
+        // 移除 title 开头 'Mikan Project - ' 前缀
+        let title = child_text(channel, "title", None);
+        let title = title.as_deref().map(|t| t.strip_prefix("Mikan Project - ").unwrap_or(t).to_string());
+        Ok(Feed { title, torrents })
     }
 }
 
