@@ -4,11 +4,12 @@
 
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use md5::Md5;
 use postgres::{Client, NoTls};
 use reqwest::blocking::Client as HttpClient;
@@ -21,8 +22,12 @@ type Sha256Data = [u8; 32];
 type Md5Data    = [u8; 16];
 type Sha1Data   = [u8; 20];
 
-/// 计算文件前 16 MiB 的 MD5, 较短文件则计算全部内容.
+/// 计算文件前 16 MiB 的 MD5, 较短文件则计算全部内容
 const MD5_PREFIX_BYTES: u64 = 16 * 1024 * 1024;
+/// 限制单次数据库请求的记录数
+const DB_BATCH_SIZE: usize = 1000;
+/// 单次读取文件的缓冲区大小, 1 MiB
+const FILE_BUFFER_SIZE: usize = 1024 * 1024;
 
 
 /// 运行所需的 qBittorrent 和 PostgreSQL 连接配置.
@@ -124,13 +129,24 @@ fn run() -> Result<()> {
     let mut new_files     = Vec::new();
     let mut indexed_files = Vec::new();
     let mut skipped       = 0usize;
+
+    // 创建多进度条显示器
+    let display  = MultiProgress::new();
+    let progress = display.add(progress_bar(records.len(), "处理文件")?);
+    let bytes    = display.add(progress_bar(0, "文件哈希")?);
+    bytes.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} ETA {eta}",
+    )?);
+
+    // 所有文件复用同一缓冲区, 保持顺序读取且避免重复分配内存
+    let mut buffer = vec![0u8; FILE_BUFFER_SIZE];
     for mut record in records {
 
         // 如果文件已经有 SHA256, 直接归类为已索引文件
         if record.file_sha256.is_some() { indexed_files.push(record); }
 
         // 否则计算文件哈希并归类为新文件
-        else { match hash_file(&record.absolute_path) {
+        else { match hash_file(&record.absolute_path, &mut buffer, &bytes) {
             Ok((sha256, md5, size, created_at)) => {
                 record.file_sha256       = Some(sha256);
                 record.file_pre16mib_md5 = Some(md5);
@@ -139,11 +155,17 @@ fn run() -> Result<()> {
                 new_files.push(record);
             }
             Err(error) => {
-                eprintln!("跳过文件 {}: {error:#}", record.absolute_path.display());
+                // 输出跳过的文件信息, 并增加跳过计数
+                progress.suspend(||
+                    eprintln!("跳过文件 {}: {error:#}", record.absolute_path.display())
+                );
                 skipped += 1;
             }
         }}
+        progress.inc(1);
     }
+    bytes.finish_and_clear();
+    progress.finish_with_message("文件处理完成");
 
     transaction_2(&mut db, &new_files, &indexed_files)?;
 
@@ -157,12 +179,15 @@ fn run() -> Result<()> {
 /// 获取所有种子及每个种子的文件列表和原始 torrent 内容.
 fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
 
+    let progress = progress_bar(0, "获取种子列表")?;
     // 获取种子列表
     let values: Vec<Value> = client
     .get(api_url(base, "torrents/info")?).send()
     .context("获取种子列表失败")?.error_for_status()
     .context("种子列表返回错误状态")?.json()
     .context("解析种子列表失败")?;
+    progress.set_length(values.len() as u64);
+    progress.set_message("获取种子文件列表和 torrent 内容");
 
     // 对于每个种子, 进一步获取其详细信息和文件列表
     let mut torrents = Vec::with_capacity(values.len());
@@ -214,7 +239,9 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
 
         // 完成一个种子的处理
         torrents.push(QbTorrent {hash_v1, title, category, contents, files});
+        progress.inc(1);
     }
+    progress.finish_with_message("种子信息获取完成");
 
     // 反回处理后的种子列表
     Ok(torrents)
@@ -223,6 +250,8 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
 /// 在同一事务中重建 in_qb, 更新种子和文件, 并读取已有路径索引.
 fn transaction_1(db: &mut Client, torrents: &[QbTorrent]) -> Result<Vec<FileRecord>> {
 
+    let file_count: usize = torrents.iter().map(|torrent| torrent.files.len()).sum();
+    let progress = progress_bar(torrents.len() * 2 + file_count * 2, "数据库阶段 1")?;
     let mut tx = db.transaction().context("开始第一阶段事务失败")?;
 
     // 准备 SQL 语句
@@ -240,18 +269,21 @@ fn transaction_1(db: &mut Client, torrents: &[QbTorrent]) -> Result<Vec<FileReco
     ")?;
     let ins_file_stmt = tx.prepare("
         INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
-        VALUES ($1, $2)
+        SELECT $1, relative_path FROM UNNEST($2::TEXT[]) AS input(relative_path)
         ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING
     ")?;
     let sel_path_stmt = tx.prepare("
-        SELECT file_sha256 FROM public.path_file WHERE absolute_path = $1
+        SELECT pf.file_sha256
+        FROM UNNEST($1::TEXT[]) WITH ORDINALITY AS input(absolute_path, ord)
+        LEFT JOIN public.path_file AS pf ON pf.absolute_path = input.absolute_path
+        ORDER BY input.ord
     ")?;
 
     // 清空 in_qb 表
     tx.execute("DELETE FROM public.in_qb", &[]).context("清空 in_qb 失败")?;
 
     // 遍历每个种子, 更新 in_qb, torrent 和 torrent_file 表, 并收集文件记录 
-    let mut records = Vec::new();
+    let mut records = Vec::with_capacity(file_count);
     for torrent in torrents {
 
         let hash_v1 = torrent.hash_v1.as_slice();
@@ -264,99 +296,141 @@ fn transaction_1(db: &mut Client, torrents: &[QbTorrent]) -> Result<Vec<FileReco
             &path_text(&torrent.category)?,
             &torrent.contents,
         ]).context("更新 torrent 失败")?;
+        progress.inc(2);
 
-        // 遍历每个文件, 更新 torrent_file 表, 并查询路径索引获取 SHA-256
-        for file in &torrent.files {
+        // 每批插入文件并查询路径索引, 依靠序号保持返回记录与原始文件顺序一致.
+        for chunk in torrent.files.chunks(DB_BATCH_SIZE) {
 
-            let relative = path_text(&file.0)?;
-            let absolute = path_text(&file.1)?;
-            tx.execute(&ins_file_stmt, &[&hash_v1, &relative]).context("更新 torrent_file 失败")?;
-            let file_sha256 = match tx.query_opt(&sel_path_stmt, &[&absolute])
-            .context("查询 path_file 失败")? {
-                Some(row) => {
-                    let bytes: Vec<u8> = row.try_get(0).context("读取 path_file 的 SHA-256 失败")?;
-                    Some(bytes.try_into().map_err(|_| {
-                        anyhow::anyhow!("path_file 的 SHA-256 长度无效: {absolute}")
-                    })?)
-                }
-                None => None,
-            };
+            let relatives: Vec<_> = chunk.iter().map(|file| path_text(&file.0)).collect::<Result<_>>()?;
+            let absolutes: Vec<_> = chunk.iter().map(|file| path_text(&file.1)).collect::<Result<_>>()?;
+            tx.execute(&ins_file_stmt, &[&hash_v1, &relatives]).context("更新 torrent_file 失败")?;
+            progress.inc(chunk.len() as u64);
+            let rows = tx.query(&sel_path_stmt, &[&absolutes]).context("查询 path_file 失败")?;
+            for (file, row) in chunk.iter().zip(rows) {
+                let file_sha256 = match row.try_get::<_, Option<Vec<u8>>>(0)
+                .context("读取 path_file 的 SHA-256 失败")? {
+                    Some(bytes) => {
+                        Some(bytes.try_into().map_err(|_| {
+                            anyhow::anyhow!("path_file 的 SHA-256 长度无效: {}", file.1.display())
+                        })?)
+                    }
+                    None => None,
+                };
 
-            records.push(FileRecord {
-                torrent_hash_v1 : torrent.hash_v1,
-                relative_path   : file.0.clone(),
-                absolute_path   : file.1.clone(),
+                records.push(FileRecord {
+                    torrent_hash_v1 : torrent.hash_v1,
+                    relative_path   : file.0.clone(),
+                    absolute_path   : file.1.clone(),
 
-                file_sha256,
-                file_pre16mib_md5 : None,
-                file_size         : None,
-                file_created_at   : None,
-            });
+                    file_sha256,
+                    file_pre16mib_md5 : None,
+                    file_size         : None,
+                    file_created_at   : None,
+                });
+            }
+            progress.inc(chunk.len() as u64);
         }
     }
 
     // 提交第一阶段事务
+    progress.set_message("提交数据库阶段 1");
     tx.commit().context("提交第一阶段事务失败")?;
+    progress.finish_with_message("数据库阶段 1 完成");
     Ok(records)
 }
 
 /// 在同一事务中更新文件索引, 路径索引及所有种子文件的 SHA-256.
 fn transaction_2(db: &mut Client, new_files: &[FileRecord], indexed_files: &[FileRecord]) -> Result<()> {
 
+    let progress = progress_bar(new_files.len() * 3 + indexed_files.len(), "数据库阶段 2")?;
     let mut tx = db.transaction().context("开始第二阶段事务失败")?;
 
     let file_stmt = tx.prepare("
         INSERT INTO public.file (sha256, pre16mib_md5, byte_count)
-        VALUES ($1, $2, $3)
+        SELECT DISTINCT ON (sha256) sha256, md5, size
+        FROM UNNEST($1::BYTEA[], $2::BYTEA[], $3::BIGINT[])
+        WITH ORDINALITY AS input(sha256, md5, size, ord)
+        ORDER BY sha256, ord DESC
         ON CONFLICT (sha256) DO UPDATE SET
             pre16mib_md5 = EXCLUDED.pre16mib_md5,
             byte_count   = EXCLUDED.byte_count
     ")?;
     let path_stmt = tx.prepare("
         INSERT INTO public.path_file (absolute_path, file_sha256, created_time, update_time)
-        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        SELECT DISTINCT ON (path) path, sha256, created_at, CURRENT_TIMESTAMP
+        FROM UNNEST($1::TEXT[], $2::BYTEA[], $3::TIMESTAMPTZ[])
+        WITH ORDINALITY AS input(path, sha256, created_at, ord)
+        ORDER BY path, ord DESC
         ON CONFLICT (absolute_path) DO UPDATE SET
             file_sha256  = EXCLUDED.file_sha256,
             created_time = EXCLUDED.created_time,
             update_time  = EXCLUDED.update_time
     ")?;
     let torrent_file_stmt = tx.prepare("
-        UPDATE public.torrent_file SET sha256 = $3
-        WHERE torrent_hash_v1 = $1 AND relative_path = $2"
+        WITH input AS (
+            SELECT hash, path, sha256, ord
+            FROM UNNEST($1::BYTEA[], $2::TEXT[], $3::BYTEA[])
+            WITH ORDINALITY AS data(hash, path, sha256, ord)
+        ), updated AS (
+            UPDATE public.torrent_file AS tf SET sha256 = latest.sha256
+            FROM (
+                SELECT DISTINCT ON (hash, path) hash, path, sha256
+                FROM input ORDER BY hash, path, ord DESC
+            ) AS latest
+            WHERE tf.torrent_hash_v1 = latest.hash AND tf.relative_path = latest.path
+            RETURNING tf.torrent_hash_v1, tf.relative_path
+        )
+        SELECT input.path FROM input
+        LEFT JOIN updated ON updated.torrent_hash_v1 = input.hash AND updated.relative_path = input.path
+        WHERE updated.torrent_hash_v1 IS NULL ORDER BY input.ord LIMIT 1"
     )?;
 
-    for record in new_files {
-        let sha256 = record.file_sha256.context("新文件缺少 SHA-256")?;
-        let md5 = record.file_pre16mib_md5.context("新文件缺少 MD5")?;
-        let size = record.file_size.context("新文件缺少文件大小")?;
-        tx.execute(&file_stmt, &[&sha256.as_slice(), &md5.as_slice(), &size])
+    // file 插入 file_sha256 -> (file_pre16mib_md5, file_size)
+    for chunk in new_files.chunks(DB_BATCH_SIZE) {
+        let hashes: Vec<_> = chunk.iter().map(|record| record.file_sha256.as_ref()
+        .map(|hash| hash.as_slice()).context("新文件缺少 SHA-256")).collect::<Result<_>>()?;
+        let md5s: Vec<_> = chunk.iter().map(|record| record.file_pre16mib_md5.as_ref()
+        .map(|hash| hash.as_slice()).context("新文件缺少 MD5")).collect::<Result<_>>()?;
+        let sizes: Vec<_> = chunk.iter().map(|record| record.file_size.context("新文件缺少文件大小"))
+        .collect::<Result<_>>()?;
+
+        tx.execute(&file_stmt, &[&hashes, &md5s, &sizes])
         .context("更新 file 失败")?;
+        progress.inc(chunk.len() as u64);
     }
 
-    for record in new_files {
-        let sha256 = record.file_sha256.context("新文件缺少 SHA-256")?;
-        tx.execute(&path_stmt, &[
-            &path_text(&record.absolute_path)?,
-            &sha256.as_slice(),
-            &record.file_created_at,
-        ])
+    // path_file 插入 absolute_path -> (file_sha256, file_created_at, <当前时间>)
+    for chunk in new_files.chunks(DB_BATCH_SIZE) {
+        let paths: Vec<_> = chunk.iter().map(|record| path_text(&record.absolute_path)).collect::<Result<_>>()?;
+        let hashes: Vec<_> = chunk.iter().map(|record| record.file_sha256.as_ref()
+        .map(|hash| hash.as_slice()).context("新文件缺少 SHA-256")).collect::<Result<_>>()?;
+        let times: Vec<_> = chunk.iter().map(|record| record.file_created_at).collect();
+        tx.execute(&path_stmt, &[&paths, &hashes, &times])
         .context("更新 path_file 失败")?;
+        progress.inc(chunk.len() as u64);
     }
 
-    for record in new_files.iter().chain(indexed_files) {
-        let sha256 = record.file_sha256.context("文件缺少 SHA-256")?;
-        let updated = tx.execute(&torrent_file_stmt, &[
-            &record.torrent_hash_v1.as_slice(),
-            &path_text(&record.relative_path)?,
-            &sha256.as_slice(),
-        ]).context("更新 torrent_file 的 SHA-256 失败")?;
-        if updated != 1 {
-            let msg = record.relative_path.display();
-            bail!("更新 torrent_file 时记录不存在: {}", msg);
+    // torrent_file 插入 (torrent_hash_v1, relative_path) -> file_sha256
+    let mut records = new_files.iter().chain(indexed_files);
+    loop {
+        let chunk: Vec<_> = records.by_ref().take(DB_BATCH_SIZE).collect();
+        if chunk.is_empty() { break; }
+        let torrent_hashes: Vec<_> = chunk.iter().map(|record| record.torrent_hash_v1.as_slice()).collect();
+        let paths: Vec<_> = chunk.iter().map(|record| path_text(&record.relative_path)).collect::<Result<_>>()?;
+        let hashes: Vec<_> = chunk.iter().map(|record| record.file_sha256.as_ref()
+        .map(|hash| hash.as_slice()).context("文件缺少 SHA-256")).collect::<Result<_>>()?;
+        if let Some(row) = tx.query_opt(&torrent_file_stmt, &[&torrent_hashes, &paths, &hashes])
+        .context("更新 torrent_file 的 SHA-256 失败")?
+        {
+            let path: String = row.try_get(0)?;
+            bail!("更新 torrent_file 时记录不存在: {path}");
         }
+        progress.inc(chunk.len() as u64);
     }
 
+    progress.set_message("提交数据库阶段 2");
     tx.commit().context("提交第二阶段事务失败")?;
+    progress.finish_with_message("数据库阶段 2 完成");
     Ok(())
 }
 
@@ -434,9 +508,10 @@ fn load_config() -> Result<Config> {
 /// 流式计算 SHA-256 和前缀 MD5, 并检查文件在读取期间是否变化.
 ///
 /// 返回值: (SHA-256, 前缀 MD5, 文件大小, 创建时间)
-fn hash_file(path: &Path) -> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>)> {
+fn hash_file(path: &Path, buffer: &mut [u8], progress: &ProgressBar)
+-> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>)> {
 
-    let file = File::open(path).context("打开文件失败")?;
+    let mut file = File::open(path).context("打开文件失败")?;
     let before = file.metadata().context("读取文件元数据失败")?;
     if !before.is_file() {
         bail!("路径不是普通文件");
@@ -448,18 +523,19 @@ fn hash_file(path: &Path) -> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>
     let created_at = match before.created() {
         Ok(time) => Some(time),
         Err(error) => {
-            eprintln!("无法读取文件创建时间 {}: {error}", path.display());
+            progress.suspend(|| eprintln!("无法读取文件创建时间 {}: {error}", path.display()));
             None
         }
     };
-    let mut reader = BufReader::new(file);
+    progress.reset();
+    progress.set_length(before.len());
+    progress.set_message(format!("文件哈希 {}", path.display()));
     let mut sha256 = Sha256::new();
     let mut md5 = Md5::new();
     let mut remaining = MD5_PREFIX_BYTES;
     let mut total = 0u64;
-    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
-        let count = reader.read(&mut buffer).context("读取文件失败")?;
+        let count = file.read(buffer).context("读取文件失败")?;
         if count == 0 {
             break;
         }
@@ -468,11 +544,9 @@ fn hash_file(path: &Path) -> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>
         md5.update(&buffer[..prefix_count]);
         remaining -= prefix_count as u64;
         total += count as u64;
+        progress.inc(count as u64);
     }
-    let after = reader
-        .get_ref()
-        .metadata()
-        .context("再次读取文件元数据失败")?;
+    let after = file.metadata().context("再次读取文件元数据失败")?;
     if total != before.len()
         || after.len() != before.len()
         || before.modified()? != after.modified()?
@@ -485,6 +559,18 @@ fn hash_file(path: &Path) -> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>
         size,
         created_at,
     ))
+}
+
+/// 创建限频刷新的进度条, 等待期间持续显示耗时, 出错退出时保留中断位置.
+fn progress_bar(length: usize, message: &'static str) -> Result<ProgressBar> {
+    let progress = ProgressBar::new(length as u64)
+        .with_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {msg} [{bar:30.cyan/blue}] {pos}/{len} ETA {eta}",
+        )?)
+        .with_message(message)
+        .with_finish(ProgressFinish::Abandon);
+    progress.enable_steady_tick(Duration::from_millis(100));
+    Ok(progress)
 }
 
 /// 基于配置地址构建 API 地址.
