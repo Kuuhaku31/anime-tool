@@ -2,20 +2,22 @@
 //! src/bin/qb.rs
 //! 从 qBittorrent 同步种子和文件信息, 并维护 PostgreSQL 文件索引.
 
-use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use md5::Md5;
-use postgres::{Client, NoTls};
+use postgres::Client;
 use reqwest::blocking::Client as HttpClient;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
+
+#[path = "../kg/utils.rs"]
+mod utils;
 
 // 几个哈希类型定义
 type Sha256Data = [u8; 32];
@@ -29,19 +31,6 @@ const DB_BATCH_SIZE: usize = 1000;
 /// 单次读取文件的缓冲区大小, 1 MiB
 const FILE_BUFFER_SIZE: usize = 1024 * 1024;
 
-
-/// 运行所需的 qBittorrent 和 PostgreSQL 连接配置.
-struct Config {
-    qb_url      : Url,         // qBittorrent Web API 的基础地址.
-    qb_username : String,      // qBittorrent 登录用户名.
-    qb_password : String,      // qBittorrent 登录密码.
-
-    pg_host     : String,      // PostgreSQL 主机名.
-    pg_port     : Option<u16>, // PostgreSQL 端口, 为空时使用驱动默认值.
-    pg_user     : String,      // PostgreSQL 用户名.
-    pg_password : String,      // PostgreSQL 密码.
-    pg_db       : String,      // PostgreSQL 数据库名称.
-}
 
 /// qBittorrent 中一个种子及其文件列表.
 struct QbTorrent {
@@ -81,7 +70,22 @@ fn main() {
 fn run() -> Result<()> {
 
     // 加载配置
-    let config = load_config()?;
+    let config = utils::EnvConfig::load(true)?.qb()?;
+
+    // 打印配置信息
+    println!("QB_URL: {}", config.qb_url);
+    println!("QB_PORT: {}", config.qb_url.port()
+        .map_or_else(|| "默认".into(), |p| p.to_string())
+    );
+    println!("QB_USERNAME: {}", config.qb_username);
+    println!("QB_PASSWORD: ******");
+    println!("PG_HOST: {}", config.pg_host);
+    println!("PG_PORT: {}", config.pg_port
+        .map_or_else(|| "默认".into(), |p| p.to_string())
+    );
+    println!("PG_USER: {}", config.pg_user);
+    println!("PG_PASSWORD: ******");
+    println!("PG_DB: {}", config.pg_db);
 
     // 创建 HTTP 客户端并登录 qBittorrent.
     let http = {
@@ -114,13 +118,9 @@ fn run() -> Result<()> {
     println!("获取种子数量: {}", torrents.len());
 
     // 配置 PostgreSQL 连接并初始化数据库客户端
-    let mut db = {
-        let mut pg_config = postgres::Config::new();
-        pg_config.host(&config.pg_host).user(&config.pg_user)
-        .password(&config.pg_password).dbname(&config.pg_db);
-        if let Some(port) = config.pg_port { pg_config.port(port); }
-        pg_config.connect(NoTls).context("连接 PostgreSQL 失败")?
-    };
+    let mut db = utils::connect_postgres(
+        &config.pg_host, config.pg_port, &config.pg_user, &config.pg_password, &config.pg_db,
+    ).context("连接 PostgreSQL 失败")?;
 
     // 执行第一阶段数据库操作, 获取文件记录
     let records = transaction_1(&mut db, &torrents)?;
@@ -255,32 +255,13 @@ fn transaction_1(db: &mut Client, torrents: &[QbTorrent]) -> Result<Vec<FileReco
     let mut tx = db.transaction().context("开始第一阶段事务失败")?;
 
     // 准备 SQL 语句
-    let ins_in_qb_stmt = tx.prepare("
-        INSERT INTO public.in_qb (torrent_hash_v1)
-        VALUES ($1) ON CONFLICT DO NOTHING
-    ")?;
-    let ins_torrent_stmt = tx.prepare("
-        INSERT INTO public.torrent (hash_v1, title, category, contents)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (hash_v1) DO UPDATE SET
-            title = EXCLUDED.title,
-            category = EXCLUDED.category,
-            contents = EXCLUDED.contents
-    ")?;
-    let ins_file_stmt = tx.prepare("
-        INSERT INTO public.torrent_file (torrent_hash_v1, relative_path)
-        SELECT $1, relative_path FROM UNNEST($2::TEXT[]) AS input(relative_path)
-        ON CONFLICT (torrent_hash_v1, relative_path) DO NOTHING
-    ")?;
-    let sel_path_stmt = tx.prepare("
-        SELECT pf.file_sha256
-        FROM UNNEST($1::TEXT[]) WITH ORDINALITY AS input(absolute_path, ord)
-        LEFT JOIN public.path_file AS pf ON pf.absolute_path = input.absolute_path
-        ORDER BY input.ord
-    ")?;
+    let ins_in_qb_stmt = tx.prepare(utils::sql!("qb/insert_in_qb.sql"))?;
+    let ins_torrent_stmt = tx.prepare(utils::sql!("qb/upsert_torrent.sql"))?;
+    let ins_file_stmt = tx.prepare(utils::sql!("qb/insert_torrent_files.sql"))?;
+    let sel_path_stmt = tx.prepare(utils::sql!("qb/select_path_hashes.sql"))?;
 
     // 清空 in_qb 表
-    tx.execute("DELETE FROM public.in_qb", &[]).context("清空 in_qb 失败")?;
+    tx.execute(utils::sql!("qb/clear_in_qb.sql"), &[]).context("清空 in_qb 失败")?;
 
     // 遍历每个种子, 更新 in_qb, torrent 和 torrent_file 表, 并收集文件记录 
     let mut records = Vec::with_capacity(file_count);
@@ -345,45 +326,9 @@ fn transaction_2(db: &mut Client, new_files: &[FileRecord], indexed_files: &[Fil
     let progress = progress_bar(new_files.len() * 3 + indexed_files.len(), "数据库阶段 2")?;
     let mut tx = db.transaction().context("开始第二阶段事务失败")?;
 
-    let file_stmt = tx.prepare("
-        INSERT INTO public.file (sha256, pre16mib_md5, byte_count)
-        SELECT DISTINCT ON (sha256) sha256, md5, size
-        FROM UNNEST($1::BYTEA[], $2::BYTEA[], $3::BIGINT[])
-        WITH ORDINALITY AS input(sha256, md5, size, ord)
-        ORDER BY sha256, ord DESC
-        ON CONFLICT (sha256) DO UPDATE SET
-            pre16mib_md5 = EXCLUDED.pre16mib_md5,
-            byte_count   = EXCLUDED.byte_count
-    ")?;
-    let path_stmt = tx.prepare("
-        INSERT INTO public.path_file (absolute_path, file_sha256, created_time, update_time)
-        SELECT DISTINCT ON (path) path, sha256, created_at, CURRENT_TIMESTAMP
-        FROM UNNEST($1::TEXT[], $2::BYTEA[], $3::TIMESTAMPTZ[])
-        WITH ORDINALITY AS input(path, sha256, created_at, ord)
-        ORDER BY path, ord DESC
-        ON CONFLICT (absolute_path) DO UPDATE SET
-            file_sha256  = EXCLUDED.file_sha256,
-            created_time = EXCLUDED.created_time,
-            update_time  = EXCLUDED.update_time
-    ")?;
-    let torrent_file_stmt = tx.prepare("
-        WITH input AS (
-            SELECT hash, path, sha256, ord
-            FROM UNNEST($1::BYTEA[], $2::TEXT[], $3::BYTEA[])
-            WITH ORDINALITY AS data(hash, path, sha256, ord)
-        ), updated AS (
-            UPDATE public.torrent_file AS tf SET sha256 = latest.sha256
-            FROM (
-                SELECT DISTINCT ON (hash, path) hash, path, sha256
-                FROM input ORDER BY hash, path, ord DESC
-            ) AS latest
-            WHERE tf.torrent_hash_v1 = latest.hash AND tf.relative_path = latest.path
-            RETURNING tf.torrent_hash_v1, tf.relative_path
-        )
-        SELECT input.path FROM input
-        LEFT JOIN updated ON updated.torrent_hash_v1 = input.hash AND updated.relative_path = input.path
-        WHERE updated.torrent_hash_v1 IS NULL ORDER BY input.ord LIMIT 1"
-    )?;
+    let file_stmt = tx.prepare(utils::sql!("qb/upsert_files.sql"))?;
+    let path_stmt = tx.prepare(utils::sql!("qb/upsert_paths.sql"))?;
+    let torrent_file_stmt = tx.prepare(utils::sql!("qb/update_torrent_file_hashes.sql"))?;
 
     // file 插入 file_sha256 -> (file_pre16mib_md5, file_size)
     for chunk in new_files.chunks(DB_BATCH_SIZE) {
@@ -434,76 +379,6 @@ fn transaction_2(db: &mut Client, new_files: &[FileRecord], indexed_files: &[Fil
     Ok(())
 }
 
-
-/// 只加载当前目录的 .env, 不覆盖进程中已存在的环境变量.
-fn load_config() -> Result<Config> {
-
-    /// 读取必需的环境变量, 缺失或为空时返回明确错误.
-    fn required_env(name: &str) -> Result<String> {
-        let value = env::var(name).with_context(|| format!("请设置 {name}"))?;
-        if value.is_empty() { bail!("{name} 不能为空"); }
-        Ok(value)
-    }
-
-    /// 读取可选端口, 若存在则检查其格式和范围.
-    fn optional_port(name: &str) -> Result<Option<u16>> {
-        match env::var(name) {
-            Ok(value) => {
-                let port = value.parse::<u16>().with_context(|| format!("{name} 必须是有效端口"))?;
-                if port == 0 { bail!("{name} 不能为 0"); }
-                Ok(Some(port))
-            }
-            Err(env::VarError::NotPresent) => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("读取 {name} 失败")),
-        }
-    }
-
-    match dotenvy::from_path(".env") {
-        Ok(_) => eprintln!("已加载当前目录的 .env"),
-        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("当前目录没有 .env, 使用现有环境变量");
-        }
-        Err(error) => return Err(error).context("加载 .env 失败"),
-    }
-
-    let mut qb_url = Url::parse(&required_env("QB_URL")?).context("QB_URL 不是有效的 URL")?;
-    if !matches!(qb_url.scheme(), "http" | "https") || qb_url.host_str().is_none() {
-        bail!("QB_URL 必须是包含主机名的 HTTP 或 HTTPS 地址");
-    }
-    if let Some(port) = optional_port("QB_PORT")? {
-        qb_url.set_port(Some(port)).map_err(|_| anyhow::anyhow!("无法设置 QB_PORT"))?;
-    }
-    if !qb_url.username().is_empty() || qb_url.password().is_some() {
-        bail!("QB_URL 不应包含用户名或密码");
-    }
-
-    let config = Config {
-        qb_url,
-        qb_username: required_env("QB_USERNAME")?,
-        qb_password: required_env("QB_PASSWORD")?,
-        pg_host: required_env("PG_HOST")?,
-        pg_port: optional_port("PG_PORT")?,
-        pg_user: required_env("PG_USER")?,
-        pg_password: required_env("PG_PASSWORD")?,
-        pg_db: required_env("PG_DB")?,
-    };
-
-    // 打印配置信息
-    println!("QB_URL: {}", config.qb_url);
-    println!("QB_PORT: {}", config.qb_url.port()
-        .map_or_else(|| "默认".into(), |p| p.to_string())
-    );
-    println!("QB_USERNAME: {}", config.qb_username);
-    println!("QB_PASSWORD: ******");
-    println!("PG_HOST: {}", config.pg_host);
-    println!("PG_PORT: {}", config.pg_port
-        .map_or_else(|| "默认".into(), |p| p.to_string())
-    );
-    println!("PG_USER: {}", config.pg_user);
-    println!("PG_PASSWORD: ******");
-    println!("PG_DB: {}", config.pg_db);
-    Ok(config)
-}
 
 /// 流式计算 SHA-256 和前缀 MD5, 并检查文件在读取期间是否变化.
 ///
@@ -563,14 +438,11 @@ fn hash_file(path: &Path, buffer: &mut [u8], progress: &ProgressBar)
 
 /// 创建限频刷新的进度条, 等待期间持续显示耗时, 出错退出时保留中断位置.
 fn progress_bar(length: usize, message: &'static str) -> Result<ProgressBar> {
-    let progress = ProgressBar::new(length as u64)
-        .with_style(ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] {msg} [{bar:30.cyan/blue}] {pos}/{len} ETA {eta}",
-        )?)
-        .with_message(message)
-        .with_finish(ProgressFinish::Abandon);
-    progress.enable_steady_tick(Duration::from_millis(100));
-    Ok(progress)
+    utils::progress_bar(
+        length,
+        "{spinner:.green} [{elapsed_precise}] {msg} [{bar:30.cyan/blue}] {pos}/{len} ETA {eta}",
+        Some(message),
+    )
 }
 
 /// 基于配置地址构建 API 地址.

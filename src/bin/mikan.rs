@@ -2,18 +2,17 @@
 //! src/bin/mikan.rs
 //! 从 main.ids 读取蜜柑 RSS ID, 获取订阅内容并更新订阅和种子信息.
 
-use std::env;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
-use postgres::{Client, NoTls, Statement};
 use reqwest::blocking::Client as HttpClient;
 use roxmltree::{Document, Node};
 use url::Url;
+
+#[path = "../kg/utils.rs"]
+mod utils;
 
 /// 蜜柑 RSS 扩展节点使用的命名空间, 不随请求域名改变.
 const TORRENT_NS: &str = "https://mikanani.me/0.1/";
@@ -25,13 +24,6 @@ type Sha1Data   = [u8; 20];
 #[derive(Parser)]
 #[command(name = "mikan", version, about = "从 main.ids 获取蜜柑 RSS 并更新种子信息")]
 struct Cli {}
-
-/// 蜜柑请求配置, 数据库使用同项目的 PG_* 环境变量.
-struct Config {
-    rss_base: Url,     // RSS 接口地址
-    timeout: Duration, // 单次请求的超时
-    delay: Duration,   // 相邻订阅请求之间的等待时间
-}
 
 /// 一次 RSS 请求解析出的频道信息和种子列表.
 struct Feed {
@@ -61,20 +53,13 @@ fn main() {
 fn run() -> Result<()> {
 
     let _cli = Cli::parse();
-    match dotenvy::from_path(".env") {
-        Ok(_) => Ok(()),
-        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("加载 .env 失败"),
-    }?;
+    let env = utils::EnvConfig::load(false)?;
 
-    let config = load_config()?;
-    let mut db = connect_postgres()?;
+    let config = env.mikan()?;
+    let mut db = env.connect_main(Some("PG_PORT 不是有效的 Unicode"))?;
 
     // 读取去重后的订阅 ID
-    let sql = "
-        SELECT DISTINCT mikan_rss_id FROM public.ids
-        WHERE mikan_rss_id IS NOT NULL ORDER BY mikan_rss_id";
-    let ids: Vec<i32> = db.query(sql, &[]).context("读取 ids.mikan_rss_id 失败")?
+    let ids: Vec<i32> = db.query(utils::sql!("mikan/select_ids.sql"), &[]).context("读取 ids.mikan_rss_id 失败")?
     .into_iter().map(|row| row.try_get(0)).collect::<std::result::Result<_, _>>()?;
     if ids.is_empty() {
         println!("ids 表中没有 mikan_rss_id, 无需同步");
@@ -87,29 +72,12 @@ fn run() -> Result<()> {
     .build().context("创建 HTTP 客户端失败")?;
 
     // 在请求前准备语句, 尽早发现表结构问题, 并复用服务器端执行计划.
-    let rss_stmt = db.prepare("
-        INSERT INTO public.mikan_rss (rss_id, title, update_datetime)
-        VALUES ($1, $2, CURRENT_TIMESTAMP)
-        ON CONFLICT (rss_id) DO UPDATE SET title = EXCLUDED.title, update_datetime = EXCLUDED.update_datetime
-    ",).context("准备 mikan_rss 更新语句失败")?;
-    let torrent_stmt = db.prepare("
-        INSERT INTO public.mikan_torrent
-        (hash_v1, mikan_rss_id, file_byte_count, title, description, pub_datetime, update_time)
-        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
-        ON CONFLICT (hash_v1) DO UPDATE SET
-            mikan_rss_id    = EXCLUDED.mikan_rss_id,
-            file_byte_count = EXCLUDED.file_byte_count,
-            title           = EXCLUDED.title,
-            description     = EXCLUDED.description,
-            pub_datetime    = EXCLUDED.pub_datetime,
-            update_time     = EXCLUDED.update_time
-    ").context("准备 mikan_torrent 更新语句失败")?;
-    let progress = ProgressBar::new(ids.len() as u64);
-
+    let rss_stmt = db.prepare(utils::sql!("mikan/upsert_rss.sql"))
+        .context("准备 mikan_rss 更新语句失败")?;
+    let torrent_stmt = db.prepare(utils::sql!("mikan/upsert_torrent.sql"))
+        .context("准备 mikan_torrent 更新语句失败")?;
     // 设置进度条
-    let f = "{spinner:.green} [{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} ETA {eta} {msg}";
-    progress.set_style(ProgressStyle::with_template(f)?);
-    progress.enable_steady_tick(Duration::from_millis(100));
+    let progress = utils::progress_bar(ids.len(), utils::SYNC_PROGRESS_TEMPLATE, None)?;
 
     let mut success = 0usize;
     let mut failed = 0usize;
@@ -118,15 +86,11 @@ fn run() -> Result<()> {
         progress.set_message(format!("获取蜜柑 RSS {id}"));
         let result = fetch_feed(&client, &config.rss_base, *id).and_then(|feed| {
             progress.set_message(format!("写入蜜柑 RSS {id}, {} 个种子", feed.torrents.len()));
-            let db: &mut Client = &mut db;
-            let rss_stmt: &Statement = &rss_stmt;
-            let torrent_stmt: &Statement = &torrent_stmt;
             let id = *id;
-            let feed: &Feed = &feed;
             let mut tx = db.transaction().context("开始订阅事务失败")?;
-            tx.execute(rss_stmt, &[&id, &feed.title]).context("更新 mikan_rss 失败")?;
+            tx.execute(&rss_stmt, &[&id, &feed.title]).context("更新 mikan_rss 失败")?;
             for torrent in &feed.torrents {
-                tx.execute(torrent_stmt, &[
+                tx.execute(&torrent_stmt, &[
                     &torrent.hash_v1.as_slice(), &id, &torrent.file_byte_count,
                     &torrent.title, &torrent.description, &torrent.pub_datetime,
                 ]).context("更新 mikan_torrent 失败")?;
@@ -225,9 +189,7 @@ fn fetch_feed(client: &HttpClient, base: &Url, id: i32) -> Result<Feed> {
         })
     }
 
-    if id < 0 {
-        bail!("mikan_rss_id 不能小于 0");
-    }
+    if id < 0 { bail!("mikan_rss_id 不能小于 0"); }
     let mut url = base.clone();
     // 覆盖已有 bangumiId, 同时保留反向代理可能需要的其他查询参数.
     let pairs: Vec<_> = url.query_pairs().filter(|(key, _)| key != "bangumiId")
@@ -255,61 +217,3 @@ fn fetch_feed(client: &HttpClient, base: &Url, id: i32) -> Result<Feed> {
         Ok(Feed { title, torrents })
     }
 }
-
-
-/// 读取旧脚本兼容的接口地址和请求节流配置.
-fn load_config() -> Result<Config> {
-
-    /// 读取环境变量, 仅在未设置时使用默认值, 非 Unicode 值显式报错.
-    fn env_or(name: &str, default: &str) -> Result<String> {
-        match env::var(name) {
-            Ok(value) => Ok(value),
-            Err(env::VarError::NotPresent) => Ok(default.to_owned()),
-            Err(error) => Err(error).with_context(|| format!("读取 {name} 失败")),
-        }
-    }
-
-    let rss_base = Url::parse(&env_or("MIKAN_RSS_BASE", "https://mikanani.me/RSS/Bangumi")?)
-        .context("MIKAN_RSS_BASE 不是有效的 URL")?;
-    if !matches!(rss_base.scheme(), "http" | "https") || rss_base.host_str().is_none() {
-        bail!("MIKAN_RSS_BASE 必须是 HTTP 或 HTTPS 地址");
-    }
-    let timeout: u64 = env_or("REQUEST_TIMEOUT", "15")?.parse().context("REQUEST_TIMEOUT 必须是正整数秒数")?;
-    if timeout == 0 {
-        bail!("REQUEST_TIMEOUT 必须大于 0");
-    }
-    let seconds: f64 = env_or("REQUEST_DELAY", "0.2")?.parse().context("REQUEST_DELAY 必须是非负秒数")?;
-    let delay = Duration::try_from_secs_f64(seconds).context("REQUEST_DELAY 必须是有限的非负秒数")?;
-    Ok(Config { rss_base, timeout: Duration::from_secs(timeout), delay })
-}
-
-
-/// 使用 PG_* 配置连接 main, 与 set-ids 保持相同的数据库选择规则.
-fn connect_postgres() -> Result<Client> {
-
-    /// 读取必需的非空连接配置.
-    fn required_env(name: &str) -> Result<String> {
-        let value = env::var(name).with_context(|| format!("请设置 {name}"))?;
-        if value.is_empty() {
-            bail!("{name} 不能为空");
-        }
-        Ok(value)
-    }
-
-    let mut config = postgres::Config::new();
-    config.host(&required_env("PG_HOST")?)
-        .user(&required_env("PG_USER")?)
-        .password(required_env("PG_PASSWORD")?)
-        .dbname("main");
-    if let Some(value) = env::var_os("PG_PORT") {
-        let port: u16 = value.to_str().context("PG_PORT 不是有效的 Unicode")?
-            .parse().context("PG_PORT 必须是有效端口")?;
-        if port == 0 {
-            bail!("PG_PORT 不能为 0");
-        }
-        config.port(port);
-    }
-    config.connect(NoTls).context("连接 PostgreSQL main 失败")
-}
-
-
