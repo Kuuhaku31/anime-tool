@@ -15,6 +15,11 @@ use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+/// SHA-256 的 32 字节原始值.
+pub(super) type Sha256Data = [u8; 32];
+/// 前 16 MiB MD5 的 16 字节原始值.
+pub(super) type Md5Data = [u8; 16];
+
 /// 单次读取文件的缓冲区大小, 1 MiB.
 pub(super) const FILE_BUFFER_SIZE: usize = 1024 * 1024;
 /// 计算文件前 16 MiB 的 MD5, 较短文件则计算全部内容.
