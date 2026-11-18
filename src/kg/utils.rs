@@ -1,16 +1,24 @@
 
 //! src/kg/utils.rs
-//! 为 qb, bgm 和 mikan 提供共享的配置, 数据库连接及进度条工具.
+//! 为同步命令提供共享的配置, 数据库连接, 文件哈希和进度条工具.
 
-// 三个二进制通过路径各自引入此模块, 只使用其中需要的工具.
+// 各二进制通过路径引入此模块, 只使用其中需要的工具.
 #![allow(dead_code)]
 
-use std::{collections::HashMap, env, ffi::{OsStr, OsString}, time::Duration};
+use std::{collections::HashMap, env, ffi::{OsStr, OsString}, fs::File, io::Read,
+    path::{Path, PathBuf}, time::{Duration, SystemTime}};
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
+use md5::Md5;
 use postgres::{Client, NoTls};
+use sha2::{Digest, Sha256};
 use url::Url;
+
+/// 单次读取文件的缓冲区大小, 1 MiB.
+pub(super) const FILE_BUFFER_SIZE: usize = 1024 * 1024;
+/// 计算文件前 16 MiB 的 MD5, 较短文件则计算全部内容.
+const MD5_PREFIX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// 在编译时载入 src/kg/sql 下的 SQL 文件, 不依赖运行目录.
 macro_rules! sql {
@@ -125,6 +133,23 @@ impl EnvConfig {
         Ok(MikanConfig { rss_base, timeout, delay })
     }
 
+    /// 从 JSON 数组读取媒体根目录.
+    pub(super) fn media_dirs(&self) -> Result<Vec<PathBuf>> {
+        serde_json::from_str(&self.required_env("MEDIA_DIRS")?)
+            .context("MEDIA_DIRS 必须是 JSON 路径字符串数组")
+    }
+
+    /// 使用 PG_DB 及其他 PG_* 环境变量连接数据库.
+    pub(super) fn connect_configured(&self) -> Result<Client> {
+        let host = self.required_env("PG_HOST")?;
+        let port = self.optional_port("PG_PORT", None)?;
+        let user = self.required_env("PG_USER")?;
+        let password = self.required_env("PG_PASSWORD")?;
+        let db = self.required_env("PG_DB")?;
+        connect_postgres(&host, port, &user, &password, &db)
+            .context("连接 PostgreSQL 失败")
+    }
+
     /// 使用 PG_* 配置连接固定的 main 数据库, 与 set-ids 保持相同的数据库选择规则.
     pub(super) fn connect_main(&self, non_unicode_port_error: Option<&str>) -> Result<Client> {
         let host = self.required_env("PG_HOST")?;
@@ -210,4 +235,54 @@ pub(super) fn progress_bar(
     }
     progress.enable_steady_tick(Duration::from_millis(100));
     Ok(progress)
+}
+
+/// 流式计算 SHA-256 和前缀 MD5, 并检查文件在读取期间是否变化.
+///
+/// 返回值: (SHA-256, 前缀 MD5, 文件大小, 创建时间)
+pub(super) fn hash_file(path: &Path, buffer: &mut [u8], progress: &ProgressBar)
+-> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>)> {
+    let mut file = File::open(path).context("打开文件失败")?;
+    let before = file.metadata().context("读取文件元数据失败")?;
+    if !before.is_file() {
+        bail!("路径不是普通文件");
+    }
+    if before.len() == 0 {
+        bail!("数据库 file.byte_count 要求大于 0, 无法索引空文件");
+    }
+    let size = i64::try_from(before.len()).context("文件大小超出数据库 bigint 范围")?;
+    let created_at = match before.created() {
+        Ok(time) => Some(time),
+        Err(error) => {
+            progress.suspend(|| eprintln!("无法读取文件创建时间 {}: {error}", path.display()));
+            None
+        }
+    };
+    progress.reset();
+    progress.set_length(before.len());
+    progress.set_message(format!("文件哈希 {}", path.display()));
+    let mut sha256 = Sha256::new();
+    let mut md5 = Md5::new();
+    let mut remaining = MD5_PREFIX_BYTES;
+    let mut total = 0u64;
+    loop {
+        let count = file.read(buffer).context("读取文件失败")?;
+        if count == 0 {
+            break;
+        }
+        sha256.update(&buffer[..count]);
+        let prefix_count = remaining.min(count as u64) as usize;
+        md5.update(&buffer[..prefix_count]);
+        remaining -= prefix_count as u64;
+        total += count as u64;
+        progress.inc(count as u64);
+    }
+    let after = file.metadata().context("再次读取文件元数据失败")?;
+    if total != before.len()
+        || after.len() != before.len()
+        || before.modified()? != after.modified()?
+    {
+        bail!("文件在计算哈希期间发生变化");
+    }
+    Ok((sha256.finalize().into(), md5.finalize().into(), size, created_at))
 }

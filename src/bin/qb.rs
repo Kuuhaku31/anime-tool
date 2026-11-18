@@ -2,34 +2,28 @@
 //! src/bin/qb.rs
 //! 从 qBittorrent 同步种子和文件信息, 并维护 PostgreSQL 文件索引.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use md5::Md5;
 use postgres::Client;
 use reqwest::blocking::Client as HttpClient;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use url::Url;
 
 #[path = "../kg/utils.rs"]
 mod utils;
+
+use utils::{FILE_BUFFER_SIZE, hash_file};
 
 // 几个哈希类型定义
 type Sha256Data = [u8; 32];
 type Md5Data    = [u8; 16];
 type Sha1Data   = [u8; 20];
 
-/// 计算文件前 16 MiB 的 MD5, 较短文件则计算全部内容
-const MD5_PREFIX_BYTES: u64 = 16 * 1024 * 1024;
 /// 限制单次数据库请求的记录数
 const DB_BATCH_SIZE: usize = 1000;
-/// 单次读取文件的缓冲区大小, 1 MiB
-const FILE_BUFFER_SIZE: usize = 1024 * 1024;
 
 
 /// qBittorrent 中一个种子及其文件列表.
@@ -380,61 +374,6 @@ fn transaction_2(db: &mut Client, new_files: &[FileRecord], indexed_files: &[Fil
 }
 
 
-/// 流式计算 SHA-256 和前缀 MD5, 并检查文件在读取期间是否变化.
-///
-/// 返回值: (SHA-256, 前缀 MD5, 文件大小, 创建时间)
-fn hash_file(path: &Path, buffer: &mut [u8], progress: &ProgressBar)
--> Result<([u8; 32], [u8; 16], i64, Option<SystemTime>)> {
-
-    let mut file = File::open(path).context("打开文件失败")?;
-    let before = file.metadata().context("读取文件元数据失败")?;
-    if !before.is_file() {
-        bail!("路径不是普通文件");
-    }
-    if before.len() == 0 {
-        bail!("数据库 file.byte_count 要求大于 0, 无法索引空文件");
-    }
-    let size = i64::try_from(before.len()).context("文件大小超出数据库 bigint 范围")?;
-    let created_at = match before.created() {
-        Ok(time) => Some(time),
-        Err(error) => {
-            progress.suspend(|| eprintln!("无法读取文件创建时间 {}: {error}", path.display()));
-            None
-        }
-    };
-    progress.reset();
-    progress.set_length(before.len());
-    progress.set_message(format!("文件哈希 {}", path.display()));
-    let mut sha256 = Sha256::new();
-    let mut md5 = Md5::new();
-    let mut remaining = MD5_PREFIX_BYTES;
-    let mut total = 0u64;
-    loop {
-        let count = file.read(buffer).context("读取文件失败")?;
-        if count == 0 {
-            break;
-        }
-        sha256.update(&buffer[..count]);
-        let prefix_count = remaining.min(count as u64) as usize;
-        md5.update(&buffer[..prefix_count]);
-        remaining -= prefix_count as u64;
-        total += count as u64;
-        progress.inc(count as u64);
-    }
-    let after = file.metadata().context("再次读取文件元数据失败")?;
-    if total != before.len()
-        || after.len() != before.len()
-        || before.modified()? != after.modified()?
-    {
-        bail!("文件在计算哈希期间发生变化");
-    }
-    Ok((
-        sha256.finalize().into(),
-        md5.finalize().into(),
-        size,
-        created_at,
-    ))
-}
 
 /// 创建限频刷新的进度条, 等待期间持续显示耗时, 出错退出时保留中断位置.
 fn progress_bar(length: usize, message: &'static str) -> Result<ProgressBar> {
