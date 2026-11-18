@@ -41,6 +41,9 @@
 
 - 用所有 `hash_v1` 调用 `/api/v2/torrents/files` 获取种子文件信息,
   构建 `List<TorrentFile>`
+- 单文件种子直接使用 `/api/v2/torrents/info` 返回的 `content_path` 作为绝对路径.
+  多文件种子没有逐文件绝对路径字段, 仍使用 `save_path` 拼接 `files[].name`.
+  在 Windows 上只转换拼接时使用的分隔符, 不改写种子相对路径.
 
   ```rust
   struct TorrentFile {

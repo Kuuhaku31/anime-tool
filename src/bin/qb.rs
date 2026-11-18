@@ -187,7 +187,7 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
     let mut torrents = Vec::with_capacity(values.len());
     for value in values {
 
-        // 依次解析: 种子 v1 hash, 标题, 分类, 保存路径
+        // 依次解析: 种子 v1 hash, 标题和分类
         let hash_text = json_string(&value, "infohash_v1")?;
         let hash_v1: [u8; 20] = hex::decode(hash_text)
         .context("解析种子 v1 hash 失败")?
@@ -195,7 +195,6 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
         .map_err(|_| anyhow::anyhow!("种子 v1 hash 必须为 20 字节: {hash_text}"))?;
         let title = json_string(&value, "name")?.to_owned();
         let category = PathBuf::from(json_string(&value, "category")?);
-        let save_path = PathBuf::from(json_string(&value, "save_path")?);
 
         // 获取种子文件列表
         let files_json: Vec<Value> = client
@@ -205,7 +204,17 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
         .with_context(|| format!("种子 {hash_text} 的文件列表返回错误状态"))?.json()
         .with_context(|| format!("解析种子 {hash_text} 的文件列表失败"))?;
 
-        // 解析种子文件列表, 并构建相对于保存目录的路径和系统中的绝对路径的元组列表
+        // 单文件种子的 content_path 是文件路径, 多文件种子的 content_path 是目录.
+        let is_single_file = files_json.len() == 1;
+        let base_path = if is_single_file {
+            let content_path = json_string(&value, "content_path")?;
+            if content_path.is_empty() {
+                bail!("种子 {hash_text} 的 content_path 为空");
+            }
+            PathBuf::from(content_path)
+        } else { PathBuf::from(json_string(&value, "save_path")?) };
+
+        // 保留种子相对路径原文, 仅在拼接多文件种子的绝对路径时转换分隔符.
         let mut files = Vec::with_capacity(files_json.len());
         for file in files_json {
 
@@ -218,7 +227,10 @@ fn fetch_torrents(client: &HttpClient, base: &Url) -> Result<Vec<QbTorrent>> {
             || path.components().any(|part| !matches!(part, Component::Normal(_)))
             { bail!("无效的种子相对路径: {text}"); }
 
-            let absolute_path = save_path.join(&relative_path);
+            // 正确处理不同操作系统的路径分隔符
+            let absolute_path = if is_single_file { base_path.clone() }
+            else { base_path.join(text.replace('/', &std::path::MAIN_SEPARATOR.to_string())) };
+
             files.push((relative_path, absolute_path));
         }
 
