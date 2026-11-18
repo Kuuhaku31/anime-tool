@@ -137,35 +137,13 @@ fn fetch_package(
     anime_id: i32,
     progress: &ProgressBar,
 ) -> Result<AnimePackage> {
-    /// 将可选 JSON 整数解析为 PostgreSQL integer 范围内的值.
-    fn optional_i32(value: &Value, key: &str) -> Result<Option<i32>> {
-        match value.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::Number(number)) => number
-                .as_i64()
-                .and_then(|value| i32::try_from(value).ok())
-                .map(Some)
-                .with_context(|| format!("{key} 不是有效的 32 位整数")),
-            Some(value) => bail!("{key} 必须是整数或 null, 实际为 {value}"),
-        }
-    }
-
     /// 将 subject 和 episode JSON 映射为精简 PostgreSQL 字段.
     fn map_package(
         subject: &Value,
         episode_values: Vec<Value>,
         progress: &ProgressBar,
     ) -> Result<AnimePackage> {
-        /// 将可选 JSON 值解析为 SQL 文本, 非字符串值显式报错.
-        fn optional_string(value: Option<&Value>, key: &str) -> Result<Option<String>> {
-            match value {
-                None | Some(Value::Null) => Ok(None),
-                Some(Value::String(value)) => Ok(Some(value.clone())),
-                Some(value) => bail!("{key} 必须是字符串或 null, 实际为 {value}"),
-            }
-        }
-
-        let anime_id = optional_i32(subject, "id")?.context("subject.id 缺失")?;
+        let anime_id = utils::optional_i32(subject, "id")?.context("subject.id 缺失")?;
         let images = subject.get("images");
         let cover_url = images.and_then(|images| images.get("large"));
         let official_site = subject
@@ -188,7 +166,7 @@ fn fetch_package(
                 });
                 continue;
             }
-            let episode_id = match optional_i32(value, "id") {
+            let episode_id = match utils::optional_i32(value, "id") {
                 Ok(Some(id)) => id,
                 Ok(None) | Err(_) => {
                     progress.suspend(|| {
@@ -197,7 +175,7 @@ fn fetch_package(
                     continue;
                 }
             };
-            let episode_anime_id = optional_i32(value, "subject_id")?.unwrap_or(anime_id);
+            let episode_anime_id = utils::optional_i32(value, "subject_id")?.unwrap_or(anime_id);
             if episode_anime_id != anime_id {
                 progress.suspend(|| {
                 eprintln!(
@@ -208,30 +186,30 @@ fn fetch_package(
             }
             episodes.push(Episode {
                 episode_id,
-                title: optional_string(value.get("name"), "name")?,
-                title_cn: optional_string(value.get("name_cn"), "name_cn")?,
-                airdate: optional_date(value, "airdate")?,
-                summary: optional_string(value.get("desc"), "desc")?,
+                title: utils::optional_string(value.get("name"), "name")?,
+                title_cn: utils::optional_string(value.get("name_cn"), "name_cn")?,
+                airdate: utils::optional_date(value, "airdate")?,
+                summary: utils::optional_string(value.get("desc"), "desc")?,
                 // 数据库列名与 API 字段交叉映射, 保留 API sort 的小数表示.
-                ep: optional_episode_label(value, "sort")?,
+                ep: utils::optional_episode_label(value, "sort")?,
                 // 将 API 集数转换为 smallint, 拒绝小数和越界值以避免静默丢失数据.
-                sort: optional_i32(value, "ep")?.map(|number| {
+                sort: utils::optional_i32(value, "ep")?.map(|number| {
                     i16::try_from(number)
                         .with_context(|| format!("ep 超出 smallint 范围: {number}"))
                 }).transpose()?,
-                duration: optional_i32(value, "duration_seconds")?,
+                duration: utils::optional_i32(value, "duration_seconds")?,
             });
         }
 
         Ok(AnimePackage {
             anime_id,
-            title: optional_string(subject.get("name"), "name")?,
-            title_cn: optional_string(subject.get("name_cn"), "name_cn")?,
-            airdate: optional_date(subject, "date")?,
-            summary: optional_string(subject.get("summary"), "summary")?,
-            ep_count: optional_i32(subject, "eps")?,
-            object_count: optional_i32(subject, "total_episodes")?,
-            cover_url: optional_string(cover_url, "subject.images.large")?,
+            title: utils::optional_string(subject.get("name"), "name")?,
+            title_cn: utils::optional_string(subject.get("name_cn"), "name_cn")?,
+            airdate: utils::optional_date(subject, "date")?,
+            summary: utils::optional_string(subject.get("summary"), "summary")?,
+            ep_count: utils::optional_i32(subject, "eps")?,
+            object_count: utils::optional_i32(subject, "total_episodes")?,
+            cover_url: utils::optional_string(cover_url, "subject.images.large")?,
             official_site,
             episodes,
         })
@@ -250,7 +228,8 @@ fn fetch_package(
         bail!("subject {anime_id} 的响应不是 JSON 对象");
     }
     let response_id =
-        optional_i32(&subject, "id")?.with_context(|| format!("subject {anime_id} 缺少有效 id"))?;
+        utils::optional_i32(&subject, "id")?
+            .with_context(|| format!("subject {anime_id} 缺少有效 id"))?;
     if response_id != anime_id {
         bail!("subject ID 不匹配, 请求 {anime_id}, 响应 {response_id}");
     }
@@ -356,47 +335,6 @@ fn write_package(db: &mut Client, package: &AnimePackage) -> Result<()> {
 
     transaction.commit().context("提交动画同步事务失败")?;
     Ok(())
-}
-
-/// 将可选日期字符串转换为 PostgreSQL date.
-fn optional_date(value: &Value, key: &str) -> Result<Option<NaiveDate>> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.is_empty() => Ok(None),
-        Some(Value::String(value)) => parse_date(value)
-            .map(Some)
-            .with_context(|| format!("{key} 不是有效的 YYYY-MM-DD 日期: {value:?}")),
-        Some(value) => bail!("{key} 必须是日期字符串或 null, 实际为 {value}"),
-    }
-}
-
-/// 解析标准 ISO 日期和旧 Bangumi 数据中未补零的月日.
-fn parse_date(value: &str) -> Result<NaiveDate> {
-    let parts: Vec<_> = value.split('-').collect();
-    if parts.len() != 3
-        || parts[0].len() != 4
-        || !(1..=2).contains(&parts[1].len())
-        || !(1..=2).contains(&parts[2].len())
-        || parts
-            .iter()
-            .any(|part| !part.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        bail!("日期格式错误");
-    }
-    let year = parts[0].parse().context("解析日期年份失败")?;
-    let month = parts[1].parse().context("解析日期月份失败")?;
-    let day = parts[2].parse().context("解析日期日失败")?;
-    NaiveDate::from_ymd_opt(year, month, day).context("日期超出有效范围")
-}
-
-/// 将 API 排序数字或文本保存为文本, 不丢失小数集数.
-fn optional_episode_label(value: &Value, key: &str) -> Result<Option<String>> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => Ok(Some(number.to_string())),
-        Some(Value::String(text)) => Ok(Some(text.clone())),
-        Some(value) => bail!("{key} 必须是数字, 字符串或 null, 实际为 {value}"),
-    }
 }
 
 /// 按请求间隔暂停, 零延迟时不阻塞.

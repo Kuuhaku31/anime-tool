@@ -9,6 +9,8 @@
   的字段, 约束, 索引, 关联关系和建表 SQL.
 - [Bangumi 表结构](docs/bangumi-schema.md): `public.bangumi_anime` 和
   `public.bangumi_episode` 的字段, 约束, 级联关系, 索引和建表 SQL.
+- [Dandanplay 表结构](docs/dandanplay-schema.md): `public.dandanplay_anime` 和
+  `public.dandanplay_episode` 的字段, 约束, 外键和同步行为.
 
 ## 功能
 
@@ -174,6 +176,20 @@ API 配置可用 `BANGUMI_API_BASE` (默认 `https://api.bgm.tv`),
 刷新 `update_at`, 不删除 API 本次未返回的历史剧集.
 特别注意: 数据库 `bangumi_episode.ep` 为 text, 映射 API `episode.sort`;
 数据库 `bangumi_episode.sort` 为 smallint, 映射 API `episode.ep`, 不是同名映射.
+
+### Dandanplay 动画和剧集同步
+
+运行 `cargo run --bin ddp`, 从 PostgreSQL `main.public.ids.ddp_ani_id` 读取动画 ID,
+请求 Dandanplay 番剧详情 API, 并更新 `dandanplay_anime` 和 `dandanplay_episode`.
+需要设置 `PG_HOST`, `PG_USER`, `PG_PASSWORD`, 可选 `PG_PORT`,
+以及全局配置或 `ANIME_TOOL_APPID`、`ANIME_TOOL_APPSECRET`.
+`DANDANPLAY_API_BASE` 默认为 `https://api.dandanplay.net`,
+`REQUEST_TIMEOUT` 默认为 15 秒, `REQUEST_DELAY` 默认为 0.2 秒.
+数据库固定为 `main`, 支持当前目录 `.env`, 进程环境变量优先.
+
+每个动画独立事务, 失败后继续处理其他动画. 不删除 API 本次未返回的历史剧集.
+`bangumiUrl` 中的 Bangumi subject ID 写入可空的 `dandanplay_anime.bgm_ani_id`;
+该字段不设外键.
 
 ### qBittorrent 数据同步
 

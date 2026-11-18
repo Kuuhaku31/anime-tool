@@ -6,12 +6,19 @@
 #![allow(dead_code)]
 
 use std::{collections::HashMap, env, ffi::{OsStr, OsString}, fs::File, io::Read,
-    path::{Path, PathBuf}, time::{Duration, SystemTime}};
+    path::{Path, PathBuf}, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use md5::Md5;
 use postgres::{Client, NoTls};
+use reqwest::{
+    StatusCode,
+    blocking::{Client as HttpClient, Response},
+    header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT},
+};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -59,6 +66,21 @@ pub(super) struct BgmConfig {
     pub(super) api_base: String,  // Bangumi API 基础地址, 不含末尾斜杠.
     pub(super) timeout: Duration, // 单次 HTTP 请求的超时时间.
     pub(super) delay: Duration,   // 两次 API 请求之间的等待时间.
+}
+
+/// Dandanplay 同步命令的请求超时和间隔.
+pub(super) struct DdpConfig {
+    pub(super) api_base: String,  // Dandanplay API 基础地址.
+    pub(super) timeout: Duration, // 单次 HTTP 请求的超时时间.
+    pub(super) delay: Duration,   // 相邻动画请求之间的等待时间.
+}
+
+/// 发送带 Dandanplay 签名认证的番剧详情请求.
+pub(super) struct DdpApiClient {
+    client: HttpClient,  // 设置超时和重定向策略的 HTTP 客户端.
+    appid: String,       // Dandanplay 应用 ID.
+    appsecret: String,   // Dandanplay 应用密钥.
+    api_base: String,    // Dandanplay API 基础地址.
 }
 
 /// 蜜柑请求配置, 数据库使用同项目的 PG_* 环境变量.
@@ -124,6 +146,23 @@ impl EnvConfig {
             timeout,
             delay: Duration::try_from_secs_f64(delay).context("REQUEST_DELAY 超出有效范围")?,
         })
+    }
+
+    /// 读取 Dandanplay API 请求超时和间隔.
+    pub(super) fn ddp(&self) -> Result<DdpConfig> {
+        let api_base = self.env_or("DANDANPLAY_API_BASE", "https://api.dandanplay.net")?;
+        let api_base = api_base.trim_end_matches('/').to_owned();
+        let parsed = Url::parse(&api_base).context("DANDANPLAY_API_BASE 不是有效 URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            bail!("DANDANPLAY_API_BASE 必须是 HTTP 或 HTTPS URL");
+        }
+        let (timeout, seconds) = self.request_timing()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            bail!("REQUEST_DELAY 必须是有限的非负秒数");
+        }
+        let delay = Duration::try_from_secs_f64(seconds)
+            .context("REQUEST_DELAY 超出有效范围")?;
+        Ok(DdpConfig { api_base, timeout, delay })
     }
 
     /// 读取旧脚本兼容的接口地址和请求节流配置.
@@ -215,6 +254,215 @@ impl EnvConfig {
             .parse::<f64>()
             .context("REQUEST_DELAY 必须是非负秒数")?;
         Ok((Duration::from_secs(timeout), delay))
+    }
+}
+
+impl DdpApiClient {
+    /// 使用共享配置创建番剧详情 API 客户端.
+    pub(super) fn new(
+        appid: String,
+        appsecret: String,
+        timeout: Duration,
+        api_base: &str,
+    ) -> Result<Self> {
+        let parsed_base = Url::parse(api_base).context("Dandanplay API 基础地址无效")?;
+        if !matches!(parsed_base.scheme(), "http" | "https") || parsed_base.host_str().is_none() {
+            bail!("Dandanplay API 基础地址必须是 HTTP 或 HTTPS URL");
+        }
+        let client = HttpClient::builder()
+            .user_agent("anime-tool/0.1")
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .timeout(timeout)
+            .build()
+            .context("创建 Dandanplay HTTP 客户端失败")?;
+        Ok(Self {
+            client,
+            appid,
+            appsecret,
+            api_base: api_base.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// 获取指定动画的详情和剧集列表响应正文.
+    pub(super) fn anime(&self, anime_id: i64) -> Result<String> {
+        let api_path = format!("/api/v2/bangumi/{anime_id}");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("系统时间早于 Unix epoch")?
+            .as_secs() as i64;
+        let signature = BASE64.encode(Sha256::digest(
+            format!("{}{}{}{}", self.appid, timestamp, api_path, self.appsecret).as_bytes(),
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("anime-tool/0.1"));
+        headers.insert(
+            "X-AppId",
+            HeaderValue::from_str(&self.appid).context("Dandanplay AppID 不能用作 HTTP 请求头")?,
+        );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp.to_string()).expect("timestamp is valid ASCII"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature).expect("signature is valid ASCII"),
+        );
+        let response = self.client
+            .get(format!("{}{api_path}", self.api_base))
+            .headers(headers)
+            .send()
+            .context("请求 Dandanplay 番剧详情 API 失败")?;
+        Self::check_response(response, &api_path)
+    }
+
+    /// 检查 HTTP 状态并读取响应正文.
+    fn check_response(response: Response, api_path: &str) -> Result<String> {
+        let status = response.status();
+        let body = response.text().context("读取 Dandanplay 响应失败")?;
+        if !status.is_success() && status != StatusCode::FOUND {
+            let message = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("errorMessage")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned))
+                .unwrap_or_else(|| body.trim().to_owned());
+            bail!(
+                "Dandanplay API 请求失败: {} {}: {}",
+                status,
+                api_path,
+                if message.is_empty() { "无错误信息" } else { &message }
+            );
+        }
+        Ok(body)
+    }
+}
+
+/// 将可选 JSON 整数解析为 PostgreSQL integer 范围内的值.
+pub(super) fn optional_i32(value: &serde_json::Value, key: &str) -> Result<Option<i32>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => number
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(Some)
+            .with_context(|| format!("{key} 不是有效的 32 位整数")),
+        Some(value) => bail!("{key} 必须是整数或 null, 实际为 {value}"),
+    }
+}
+
+/// 将必需的 JSON 整数校验为非负 int64.
+pub(super) fn required_i64(value: Option<&serde_json::Value>, key: &str) -> Result<i64> {
+    let number = value.and_then(serde_json::Value::as_i64)
+        .with_context(|| format!("{key} 必须是 int64"))?;
+    if number < 0 {
+        bail!("{key} 不能是负数");
+    }
+    Ok(number)
+}
+
+/// 将可选 JSON 文本读取为字符串, 非字符串值显式报错.
+pub(super) fn optional_string(
+    value: Option<&serde_json::Value>,
+    key: &str,
+) -> Result<Option<String>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(value) => bail!("{key} 必须是字符串或 null, 实际为 {value}"),
+    }
+}
+
+/// 从 Bangumi 主题 URL 提取非负 int64 subject ID.
+pub(super) fn optional_bangumi_id(value: Option<&serde_json::Value>) -> Result<Option<i64>> {
+    let Some(url) = optional_string(value, "bangumi.bangumiUrl")? else {
+        return Ok(None);
+    };
+    if url.is_empty() {
+        return Ok(None);
+    }
+    let parsed = Url::parse(&url).with_context(|| format!("bangumiUrl 不是有效 URL: {url}"))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("bangumi.tv") {
+        bail!("bangumiUrl 必须使用 https://bangumi.tv/subject/{{id}}: {url}");
+    }
+    let mut segments = parsed.path_segments()
+        .context("bangumiUrl 不支持路径段解析")?
+        .collect::<Vec<_>>();
+    if segments.last() == Some(&"") {
+        segments.pop();
+    }
+    if segments.len() != 2 || segments[0] != "subject" {
+        bail!("bangumiUrl 路径必须是 /subject/{{id}}: {url}");
+    }
+    let id = segments[1].parse::<i64>()
+        .with_context(|| format!("bangumiUrl 的 subject ID 不是有效的 int64: {url}"))?;
+    if id < 0 {
+        bail!("bangumiUrl 的 subject ID 不能是负数: {url}");
+    }
+    Ok(Some(id))
+}
+
+/// 将可选 API 当地时间解析为不含时区的 PostgreSQL 时间.
+pub(super) fn optional_datetime(
+    value: Option<&serde_json::Value>,
+    key: &str,
+) -> Result<Option<NaiveDateTime>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if value.is_empty() => Ok(None),
+        Some(serde_json::Value::String(value)) => {
+            if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+                return Ok(Some(date.naive_local()));
+            }
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                .map(Some)
+                .with_context(|| format!("{key} 不是有效的 ISO 本地日期时间: {value:?}"))
+        }
+        Some(value) => bail!("{key} 必须是日期时间字符串或 null, 实际为 {value}"),
+    }
+}
+
+/// 将可选日期字符串转换为 PostgreSQL date.
+pub(super) fn optional_date(value: &serde_json::Value, key: &str) -> Result<Option<NaiveDate>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if value.is_empty() => Ok(None),
+        Some(serde_json::Value::String(value)) => parse_date(value)
+            .map(Some)
+            .with_context(|| format!("{key} 不是有效的 YYYY-MM-DD 日期: {value:?}")),
+        Some(value) => bail!("{key} 必须是日期字符串或 null, 实际为 {value}"),
+    }
+}
+
+/// 解析标准 ISO 日期和旧 Bangumi 数据中未补零的月日.
+fn parse_date(value: &str) -> Result<NaiveDate> {
+    let parts: Vec<_> = value.split('-').collect();
+    if parts.len() != 3
+        || parts[0].len() != 4
+        || !(1..=2).contains(&parts[1].len())
+        || !(1..=2).contains(&parts[2].len())
+        || parts
+            .iter()
+            .any(|part| !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("日期格式错误");
+    }
+    let year = parts[0].parse().context("解析日期年份失败")?;
+    let month = parts[1].parse().context("解析日期月份失败")?;
+    let day = parts[2].parse().context("解析日期日失败")?;
+    NaiveDate::from_ymd_opt(year, month, day).context("日期超出有效范围")
+}
+
+/// 将 API 排序数字或文本保存为文本, 不丢失小数集数.
+pub(super) fn optional_episode_label(
+    value: &serde_json::Value,
+    key: &str,
+) -> Result<Option<String>> {
+    match value.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => Ok(Some(number.to_string())),
+        Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+        Some(value) => bail!("{key} 必须是数字, 字符串或 null, 实际为 {value}"),
     }
 }
 
