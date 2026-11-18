@@ -51,13 +51,16 @@ fn run() -> Result<()> {
     let mut pending_dir_queue = Vec::new(); // 待扫描的媒体目录队列
     for dir in &media_dirs {
 
+        #[cfg(windows)]
+        let dir = PathBuf::from(database_path(dir).context("媒体目录不是有效的 UTF-8")?);
+
         // 检查媒体目录是否为绝对路径且不包含父目录引用 '..'
         if !dir.is_absolute() || dir.components().any(|part| part == Component::ParentDir) {
             bail!("媒体目录必须是无 '..' 的绝对路径: {}", dir.display());
         }
 
         let dir = dir.components().collect::<PathBuf>(); // 去除路径中的冗余组件, 例如 '.'
-        let mut prefix = dir.to_str().context("媒体目录不是有效的 UTF-8")?.to_owned();
+        let mut prefix = database_path(&dir).context("媒体目录不是有效的 UTF-8")?;
         // 确保前缀以路径分隔符结尾, 便于数据库匹配
         if !prefix.ends_with(MAIN_SEPARATOR) { prefix.push(MAIN_SEPARATOR); }
 
@@ -93,7 +96,7 @@ fn run() -> Result<()> {
                     format!("读取文件元数据失败: {}", path.display())
                 )?;
 
-                let path = path.to_str().context("媒体文件路径不是有效的 UTF-8")?.to_owned();
+                let path = database_path(&path).context("媒体文件路径不是有效的 UTF-8")?;
                 let size = metadata.len();
                 let created_at = metadata.created().ok();
 
@@ -112,6 +115,11 @@ fn run() -> Result<()> {
     // 从数据库中读取已有的媒体文件路径索引
     let db_file_list = tx.query(utils::sql!("media/select_paths.sql"), &[&prefixes])
     .context("读取媒体目录的路径索引失败")?;
+
+    #[cfg(windows)]
+    if db_file_list.is_empty() && !existing_file_list.is_empty() {
+        eprintln!("path_file 无匹配记录, 查询前缀: {}", prefixes.join(" | "));
+    }
 
     // 比对与写入使用同一份数据库快照, 并发修改同一行时让本次同步失败.
     let (mut to_remove, mut to_update) = (Vec::new(), Vec::new());
@@ -195,6 +203,13 @@ fn run() -> Result<()> {
         to_add.len(), to_remove.len(), to_update.len(),
     );
     Ok(())
+}
+
+/// 生成数据库比较和写入使用的 UTF-8 路径, 仅在 Windows 上统一为反斜杠.
+fn database_path(path: &Path) -> Option<String> {
+    let path = path.to_str()?;
+    if cfg!(windows) { Some(path.replace('/', "\\")) }
+    else { Some(path.to_owned()) }
 }
 
 

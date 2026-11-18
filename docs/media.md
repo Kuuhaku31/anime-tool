@@ -9,6 +9,8 @@
   ```env
   MEDIA_DIRS='["D:\\aaa", "D:\\bbb\\c", "C:\\xxx"]'
   ```
+  也可写成 `MEDIA_DIRS='["D:/aaa", "D:/bbb/c", "C:/xxx"]'`.
+  Windows 原生程序会将目录前缀和扫描到的文件路径统一为反斜杠再查询或写入.
 - Linux/WSL 示例: `MEDIA_DIRS='["/mnt/d/aaa", "/mnt/d/bbb/c"]'`.
   路径必须为当前系统实际可访问的绝对目录, 并与 `path_file` 的路径拼写一致.
 - 使用 `PG_HOST`, 可选的 `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DB` 连接 PostgreSQL.
@@ -37,6 +39,8 @@ struct MediaFile {
 通过 `media_dirs` 查找path_file表,
 返回 `absolute_path` 以某个目录和路径分隔符开头的记录及其 `file_sha256`.
 例如 `/media/anime/` 不匹配 `/media/anime-old/`.
+查询按参数值逐字匹配, 不做 SQL 转义处理, 不忽略大小写, 也不转换 UNC 和盘符等别名.
+Windows 上扫描到文件但未匹配任何索引时, 会打印实际查询使用的目录前缀.
 
 ### 数据处理
 
