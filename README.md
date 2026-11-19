@@ -191,6 +191,10 @@ API 配置可用 `BANGUMI_API_BASE` (默认 `https://api.bgm.tv`),
 `bangumiUrl` 中的 Bangumi subject ID 写入可空的 `dandanplay_anime.bgm_ani_id`;
 该字段不设外键.
 
+运行 `cargo run --bin ddp-pkg -- <ddp_ani_id>` 可仅同步指定动画及其剧集,
+不读取 `ids` 表. 配置和字段映射与 `ddp` 相同, 动画和剧集在同一事务中
+插入或更新, 失败时整体回滚, 不删除 API 本次未返回的历史剧集.
+
 ### Dandanplay 弹幕同步到数据库
 
 运行 `cargo run --bin ddp-danmaku-db -- <ddp_epi_id>`, 按指定 Dandanplay
