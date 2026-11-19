@@ -86,6 +86,62 @@ ALTER TABLE public.media_file
 上述 SQL 记录了原迁移. 当前数据库的 `media_file.ddp_epi_id` 已无剧集外键,
 检查约束为 `ddp_epi_id >= -1`, 其中 `-1` 表示无法精确关联.
 
+## public.dandanplay_danmaku
+
+`public.dandanplay_danmaku` 每行保存一个剧集弹幕, 来自
+`GET /api/v2/comment/{episodeId}`. 官方 `cid` 是 int64,
+`p` 格式为 `出现秒数,模式,颜色,用户ID`, `m` 是弹幕正文.
+
+| 字段 | PostgreSQL 类型 | NULL | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `ddp_epi_id` | `bigint` | 否 | 无 | 所属剧集, 复合主键首列 |
+| `cid` | `bigint` | 否 | 无 | API 弹幕 ID, 复合主键次列 |
+| `appear_time` | `double precision` | 是 | NULL | 从 `p` 拆出的出现秒数 |
+| `mode` | `smallint` | 否 | `1` | `1` 滚动, `4` 底部, `5` 顶部 |
+| `color` | `integer` | 否 | `16777215` | RGB 整数, 默认白色 |
+| `user_id` | `text` | 是 | NULL | 从 `p` 拆出, 按文本保存 |
+| `content` | `text` | 是 | NULL | API 字段 `m` |
+| `raw_p` | `text` | 是 | NULL | 保留 API 原始 `p` |
+| `update_at` | `timestamptz` | 否 | `CURRENT_TIMESTAMP` | 最近一次同步时间 |
+
+主键为 `(ddp_epi_id, cid)`, 避免假设关联弹幕在不同剧集间 ID 全局唯一.
+剧集外键使用 `ON DELETE CASCADE`. 时间线索引为
+`(ddp_epi_id, appear_time, cid)`. `p` 无效时保留 `raw_p`,
+`appear_time` 和 `user_id` 写 NULL, `mode` 和 `color` 使用默认值.
+
+```sql
+CREATE TABLE public.dandanplay_danmaku (
+    ddp_epi_id bigint NOT NULL,
+    cid bigint NOT NULL,
+    appear_time double precision,
+    mode smallint NOT NULL DEFAULT 1,
+    color integer NOT NULL DEFAULT 16777215,
+    user_id text,
+    content text,
+    raw_p text,
+    update_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT dandanplay_danmaku_pkey PRIMARY KEY (ddp_epi_id, cid),
+    CONSTRAINT dandanplay_danmaku_episode_fk
+        FOREIGN KEY (ddp_epi_id)
+        REFERENCES public.dandanplay_episode (ddp_epi_id)
+        ON UPDATE NO ACTION
+        ON DELETE CASCADE,
+    CONSTRAINT dandanplay_danmaku_cid_nonnegative CHECK (cid >= 0),
+    CONSTRAINT dandanplay_danmaku_time_range
+        CHECK (appear_time IS NULL OR appear_time >= 0),
+    CONSTRAINT dandanplay_danmaku_mode_range CHECK (mode IN (1, 4, 5)),
+    CONSTRAINT dandanplay_danmaku_color_range
+        CHECK (color BETWEEN 0 AND 16777215)
+);
+
+CREATE INDEX dandanplay_danmaku_timeline_idx
+    ON public.dandanplay_danmaku (ddp_epi_id, appear_time, cid);
+```
+
+实际建表 SQL 为 `src/kg/sql/ddp/create_danmaku.sql`.
+命令 `cargo run --bin ddp-danmaku-db -- <ddp_epi_id>` 同步单集弹幕.
+它按 `(ddp_epi_id, cid)` upsert, 更新已有弹幕但不删除 API 本次未返回的记录.
+
 ## 同步行为
 
 - `ddp` 从 `public.ids.ddp_ani_id` 读取非 NULL 且去重排序后的 ID.

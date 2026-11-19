@@ -9,8 +9,8 @@
   的字段, 约束, 索引, 关联关系和建表 SQL.
 - [Bangumi 表结构](docs/bangumi-schema.md): `public.bangumi_anime` 和
   `public.bangumi_episode` 的字段, 约束, 级联关系, 索引和建表 SQL.
-- [Dandanplay 表结构](docs/dandanplay-schema.md): `public.dandanplay_anime` 和
-  `public.dandanplay_episode` 的字段, 约束, 外键和同步行为.
+- [Dandanplay 表结构](docs/dandanplay-schema.md): 动画, 剧集和弹幕表的字段,
+  约束, 外键和同步行为.
 
 ## 功能
 
@@ -190,6 +190,14 @@ API 配置可用 `BANGUMI_API_BASE` (默认 `https://api.bgm.tv`),
 每个动画独立事务, 失败后继续处理其他动画. 不删除 API 本次未返回的历史剧集.
 `bangumiUrl` 中的 Bangumi subject ID 写入可空的 `dandanplay_anime.bgm_ani_id`;
 该字段不设外键.
+
+### Dandanplay 弹幕同步到数据库
+
+运行 `cargo run --bin ddp-danmaku-db -- <ddp_epi_id>`, 按指定 Dandanplay
+剧集 ID 获取关联弹幕并写入 `main.public.dandanplay_danmaku`.
+复用 `ddp` 命令的 Dandanplay AppID/AppSecret、`DANDANPLAY_API_BASE`,
+`REQUEST_TIMEOUT` 和 `PG_*` 配置. 写入按 `(ddp_epi_id, cid)` upsert,
+不删除 API 本次未返回的历史弹幕. 表结构见 [Dandanplay 表结构](docs/dandanplay-schema.md).
 
 ### qBittorrent 数据同步
 

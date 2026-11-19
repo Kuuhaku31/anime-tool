@@ -294,6 +294,22 @@ impl DdpApiClient {
         Self::check_response(response, &api_path)
     }
 
+    /// 获取剧集弹幕, 默认同时请求第三方关联弹幕且不转换简繁体.
+    pub(super) fn danmaku(&self, episode_id: i64, from: i64) -> Result<String> {
+        let api_path = format!("/api/v2/comment/{episode_id}");
+        let response = self.client
+            .get(format!("{}{api_path}", self.api_base))
+            .query(&[
+                ("from", from.to_string()),
+                ("withRelated", "true".to_owned()),
+                ("chConvert", "0".to_owned()),
+            ])
+            .headers(self.signed_headers(&api_path)?)
+            .send()
+            .context("请求 Dandanplay 弹幕 API 失败")?;
+        Self::check_response(response, &api_path)
+    }
+
     /// 使用文件名前缀, 前 16 MiB MD5 和字节数请求精确哈希匹配.
     pub(super) fn match_hash_only(&self, file_name: &str, md5: &[u8], size: i64) -> Result<String> {
         let api_path = "/api/v2/match";
