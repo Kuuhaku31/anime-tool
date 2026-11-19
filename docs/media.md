@@ -58,3 +58,17 @@ struct MediaFile {
 - 将`to_add`的所有`absolute_path -> (sha256, created_at)`更新path_file表
 - 将 `to_update` 和 `to_add` 的 SHA-256 登记到 `media_file`.
   已有同哈希时保留 `ddp_epi_id`, `postiton` 和各流索引.
+
+### 媒体识别
+
+在 `PG_DB` 指定的数据库已支持 `ddp_epi_id` 为 `-1` 时,
+运行 `cargo run --bin media-identify`. 命令复用 `ddp` 的 Dandanplay 认证和请求配置.
+当前数据库的 `ddp_epi_id` 可空, 类型为 `bigint`, 约束允许 `-1`,
+且没有剧集外键, 运行前无需迁移.
+
+- 只识别 `ddp_epi_id IS NULL` 且有关联路径的文件. 有多个路径时, 按路径排序取第一条.
+- 使用不带扩展名的文件名, 前 16 MiB MD5 和字节数请求 `hashOnly` 匹配.
+- 成功且精确匹配时写入剧集 ID; 接口明确返回未精确匹配时写入 `-1`.
+- 请求失败或写入数据库失败时保留 NULL 并报错, 不影响其他文件.
+  排除故障后可重新执行识别. 已写入 `-1` 的记录不会自动重试.
+- 前 16 MiB MD5 为空时无法识别, 会报错并保留 NULL.

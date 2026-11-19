@@ -83,6 +83,8 @@ ALTER TABLE public.media_file
 `ids.ddp_ani_id` 和 `media_file.ddp_epi_id` 均已扩展为 `bigint`.
 迁移会重建依赖 `media_file.ddp_epi_id` 的 `view_meida_file`.
 实际迁移脚本为 `src/kg/sql/ddp/migrate_schema.sql`.
+上述 SQL 记录了原迁移. 当前数据库的 `media_file.ddp_epi_id` 已无剧集外键,
+检查约束为 `ddp_epi_id >= -1`, 其中 `-1` 表示无法精确关联.
 
 ## 同步行为
 

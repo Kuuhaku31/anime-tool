@@ -75,7 +75,7 @@ pub(super) struct DdpConfig {
     pub(super) delay: Duration,   // 相邻动画请求之间的等待时间.
 }
 
-/// 发送带 Dandanplay 签名认证的番剧详情请求.
+/// 发送带 Dandanplay 签名认证的番剧详情和文件匹配请求.
 pub(super) struct DdpApiClient {
     client: HttpClient,  // 设置超时和重定向策略的 HTTP 客户端.
     appid: String,       // Dandanplay 应用 ID.
@@ -258,7 +258,7 @@ impl EnvConfig {
 }
 
 impl DdpApiClient {
-    /// 使用共享配置创建番剧详情 API 客户端.
+    /// 使用共享配置创建 Dandanplay API 客户端.
     pub(super) fn new(
         appid: String,
         appsecret: String,
@@ -286,6 +286,34 @@ impl DdpApiClient {
     /// 获取指定动画的详情和剧集列表响应正文.
     pub(super) fn anime(&self, anime_id: i64) -> Result<String> {
         let api_path = format!("/api/v2/bangumi/{anime_id}");
+        let response = self.client
+            .get(format!("{}{api_path}", self.api_base))
+            .headers(self.signed_headers(&api_path)?)
+            .send()
+            .context("请求 Dandanplay 番剧详情 API 失败")?;
+        Self::check_response(response, &api_path)
+    }
+
+    /// 使用文件名前缀, 前 16 MiB MD5 和字节数请求精确哈希匹配.
+    pub(super) fn match_hash_only(&self, file_name: &str, md5: &[u8], size: i64) -> Result<String> {
+        let api_path = "/api/v2/match";
+        let response = self.client
+            .post(format!("{}{api_path}", self.api_base))
+            .headers(self.signed_headers(api_path)?)
+            .json(&serde_json::json!({
+                "fileName": file_name,
+                "fileHash": hex::encode(md5),
+                "fileSize": size,
+                "videoDuration": 0,
+                "matchMode": "hashOnly",
+            }))
+            .send()
+            .context("请求 Dandanplay 文件匹配 API 失败")?;
+        Self::check_response(response, api_path)
+    }
+
+    /// 按 API 路径和当前时间生成请求签名头.
+    fn signed_headers(&self, api_path: &str) -> Result<HeaderMap> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("系统时间早于 Unix epoch")?
@@ -308,12 +336,7 @@ impl DdpApiClient {
             "X-Signature",
             HeaderValue::from_str(&signature).expect("signature is valid ASCII"),
         );
-        let response = self.client
-            .get(format!("{}{api_path}", self.api_base))
-            .headers(headers)
-            .send()
-            .context("请求 Dandanplay 番剧详情 API 失败")?;
-        Self::check_response(response, &api_path)
+        Ok(headers)
     }
 
     /// 检查 HTTP 状态并读取响应正文.
