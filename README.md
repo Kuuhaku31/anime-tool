@@ -11,6 +11,7 @@
   `public.bangumi_episode` 的字段, 约束, 级联关系, 索引和建表 SQL.
 - [Dandanplay 表结构](docs/dandanplay-schema.md): 动画, 剧集和弹幕表的字段,
   约束, 外键和同步行为.
+- [ODS 到 PostgreSQL 导入](docs/ods2pg.md): ODS 工作表按列映射并事务化 upsert.
 
 ## 功能
 
@@ -160,6 +161,14 @@ Tab 分隔时保留空列, 缺失的可选 ID 写入 NULL; 也接受空格分隔
 第一列必填, 非空 ID 必须是正的 32 位整数. 空行和以 `#` 开头的行会跳过,
 重复记录原样保留. 文件中的所有行通过校验后, 才在同一事务中清空旧记录
 并批量写入; 失败时回滚. 空文件或仅含空行及注释的文件会清空表.
+
+### ODS 数据导入
+
+运行 `cargo run --bin ods2pg -- <ods-file> <sheet> <table> <pk-column>
+<pk-name> - <column> <name>`, 自动遍历工作表实际范围并按列映射写入
+PostgreSQL. 支持复合主键, 全映射字段为空的行会跳过, 其他空单元格写 SQL NULL.
+冲突时更新普通字段, 全部数据在单个事务中提交或回滚. 数据库参数可用
+`--pg-*` 选项或 `PG_*` 环境变量配置. 详见 [ODS 导入文档](docs/ods2pg.md).
 
 ### Bangumi 动画和剧集同步
 
