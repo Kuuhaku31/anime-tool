@@ -1,3 +1,7 @@
+
+// src/ass.rs
+// 提供弹幕输入结构和 ASS 字幕渲染逻辑.
+
 use std::{cmp::Ordering, fmt::Write};
 
 use anyhow::Context;
@@ -7,37 +11,70 @@ const PLAY_RES_X: i32 = 1920;
 const PLAY_RES_Y: i32 = 1080;
 const FIXED_DURATION: f64 = 5.0;
 
+/// 生成 ASS 字幕时使用的样式和时间设置.
 #[derive(Debug, Clone)]
 pub struct AssSettings {
+    /// ASS 字体名称.
     pub font: String,
+    /// 用户侧字体大小, 会映射到 ASS 坐标.
     pub font_size: f64,
+    /// 弹幕不透明度, 范围为 0..=1.
     pub alpha: f64,
+    /// 是否使用粗体.
     pub bold: bool,
+    /// 弹幕描边宽度.
     pub border: f64,
+    /// 弹幕时间偏移, 正值延后, 负值提前.
     pub offset: f64,
+    /// 滚动弹幕横穿画面的持续时间, 单位为秒.
+    pub scroll_duration: f64,
+    /// 弹幕可使用的画面高度比例.
+    pub display_area: f64,
 }
 
 impl Default for AssSettings {
+    /// 返回可兼容现有 `render-ass` 行为的默认设置.
     fn default() -> Self {
         Self {
             font: "Microsoft YaHei".to_owned(),
             font_size: 24.0,
-            alpha: 1.0,
+            alpha: 0.7,
             bold: false,
             border: 1.0,
             offset: 0.0,
+            scroll_duration: 10.0,
+            display_area: 1.0,
         }
     }
 }
 
+/// 一条已从数据库或其他来源解析的 Dandanplay 弹幕.
+#[derive(Debug, Clone)]
+pub struct AssDanmaku {
+    /// 弹幕出现时间, 单位为秒.
+    pub time: f64,
+    /// 弹幕正文.
+    pub content: String,
+    /// Dandanplay 弹幕模式, 1 为滚动, 4 为底部, 5 为顶部.
+    pub mode: i32,
+    /// RGB 颜色整数.
+    pub color: i32,
+}
+
+/// 内部用于轨道分配的弹幕数据.
 #[derive(Debug, Clone)]
 struct Danmaku {
+    /// 加入偏移后的出现时间.
     time: f64,
+    /// 弹幕正文.
     content: String,
+    /// Dandanplay 弹幕模式.
     mode: i32,
+    /// RGB 颜色整数.
     color: i32,
 }
 
+/// ASS 中弹幕的位置类别.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Scroll,
@@ -45,6 +82,7 @@ enum Kind {
     Bottom,
 }
 
+/// 将 Dandanplay 缓存 JSON 解析为 ASS 字幕文本.
 pub fn render_from_json(body: &str, settings: &AssSettings) -> anyhow::Result<String> {
     let value: Value = serde_json::from_str(body).context("弹幕缓存不是合法 JSON")?;
 
@@ -72,25 +110,45 @@ pub fn render_from_json(body: &str, settings: &AssSettings) -> anyhow::Result<St
         let mode = parts[1].parse::<i32>().unwrap_or(1);
         let color = parts[2].parse::<i32>().unwrap_or(0xFF_FF_FF);
 
-        let time = raw_time + settings.offset;
-        if time < 0.0 {
-            continue;
-        }
-
-        items.push(Danmaku {
-            time,
+        items.push(AssDanmaku {
+            time: raw_time,
             content: content.to_owned(),
             mode,
             color: color & 0x00FF_FFFF,
         });
     }
 
-    items.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(Ordering::Equal));
+    render_danmaku(&items, settings)
+}
 
+/// 将已解析弹幕按设置渲染为 ASS 字幕文本.
+pub fn render_danmaku(items: &[AssDanmaku], settings: &AssSettings) -> anyhow::Result<String> {
     let ass_font_size = resolve_font_size(settings.font_size);
     let lane_height = ((ass_font_size * 1.3).round() as i32).clamp(1, PLAY_RES_Y);
-    let lane_count =
-        (((PLAY_RES_Y as f64) / lane_height as f64).floor() as i32).clamp(1, 64) as usize;
+    let display_area = if settings.display_area.is_finite() {
+        settings.display_area.clamp(0.01, 1.0)
+    } else {
+        1.0
+    };
+    let lane_count = (((PLAY_RES_Y as f64 * display_area) / lane_height as f64).floor() as i32)
+        .clamp(1, 64) as usize;
+    let duration = if settings.scroll_duration.is_finite() && settings.scroll_duration > 0.0 {
+        settings.scroll_duration
+    } else {
+        10.0
+    };
+    let mut items = items.iter()
+        .filter_map(|item| {
+            let time = item.time + settings.offset;
+            (time.is_finite() && time >= 0.0 && !item.content.is_empty()).then(|| Danmaku {
+                time,
+                content: item.content.clone(),
+                mode: item.mode,
+                color: item.color & 0x00FF_FFFF,
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(Ordering::Equal));
 
     let mut output = String::new();
     write_header(&mut output, ass_font_size, settings);
@@ -115,7 +173,6 @@ pub fn render_from_json(body: &str, settings: &AssSettings) -> anyhow::Result<St
 
         match kind {
             Kind::Scroll => {
-                let duration = 10.0;
                 let Some(lane) = pick_scroll_lane(&mut scroll_lanes, item.time, width, duration)
                 else {
                     continue;
@@ -191,12 +248,12 @@ pub fn render_from_json(body: &str, settings: &AssSettings) -> anyhow::Result<St
     Ok(output)
 }
 
-// Scales its player font size by 1.6 and clamps
-// the resulting ASS font size to 18..96.
+/// 将用户侧字号乘以 1.6 并限制到 ASS 空间 18..96.
 fn resolve_font_size(input: f64) -> f64 {
     (input * 1.6).clamp(18.0, 96.0)
 }
 
+/// 将 Dandanplay 模式映射为 ASS 弹幕位置类别.
 fn kind_from_mode(mode: i32) -> Kind {
     match mode {
         4 => Kind::Bottom,
@@ -205,6 +262,7 @@ fn kind_from_mode(mode: i32) -> Kind {
     }
 }
 
+/// 按字符宽度估算弹幕占用的水平空间.
 fn estimate_width(text: &str, font_size: f64) -> f64 {
     if text.is_empty() {
         return font_size;
@@ -224,6 +282,7 @@ fn estimate_width(text: &str, font_size: f64) -> f64 {
     })
 }
 
+/// 为滚动弹幕选择一个不会立即碰撞的轨道.
 fn pick_scroll_lane(
     lanes: &mut [Option<f64>],
     time: f64,
@@ -245,6 +304,7 @@ fn pick_scroll_lane(
     None
 }
 
+/// 为固定位置弹幕选择一个轨道.
 fn pick_fixed_lane(lanes: &mut [Option<f64>], time: f64, duration: f64) -> usize {
     let mut earliest = 0usize;
     let mut earliest_free_at = f64::INFINITY;
@@ -267,11 +327,13 @@ fn pick_fixed_lane(lanes: &mut [Option<f64>], time: f64, duration: f64) -> usize
     earliest
 }
 
+/// 将不透明度编码为 ASS alpha 标签.
 fn alpha_hex(opacity: f64) -> String {
     let alpha = ((1.0 - opacity.clamp(0.0, 1.0)) * 255.0).round() as i32;
     format!("&H{:02X}&", alpha.clamp(0, 255))
 }
 
+/// 将 RGB 颜色转换为 ASS BGR 颜色覆盖标签.
 fn color_override(rgb: i32) -> String {
     let rgb = rgb & 0x00FF_FFFF;
 
@@ -286,6 +348,7 @@ fn color_override(rgb: i32) -> String {
     format!("\\c&H{:06X}&", (b << 16) | (g << 8) | r)
 }
 
+/// 为接近黑色的文字选择白色描边.
 fn outline_color_override(rgb: i32) -> &'static str {
     let r = (rgb >> 16) & 0xFF;
     let g = (rgb >> 8) & 0xFF;
@@ -298,6 +361,7 @@ fn outline_color_override(rgb: i32) -> &'static str {
     }
 }
 
+/// 转义 ASS 控制字符, 防止弹幕文本改变字幕结构.
 fn escape_ass_text(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('{', "\\{")
@@ -306,6 +370,7 @@ fn escape_ass_text(text: &str) -> String {
         .replace('\r', "")
 }
 
+/// 将秒数格式化为 ASS 小时, 分钟, 秒和百分之一秒.
 fn format_ass_time(seconds: f64) -> String {
     let seconds = seconds.max(0.0);
     let total_cs = (seconds * 100.0).round() as i64;
@@ -318,6 +383,7 @@ fn format_ass_time(seconds: f64) -> String {
     format!("{}:{:02}:{:02}.{:02}", hour, minute, second, cs)
 }
 
+/// 向 ASS Events 区域追加一条 Dialogue.
 fn write_dialogue(
     output: &mut String,
     layer: i32,
@@ -338,6 +404,7 @@ fn write_dialogue(
     .context("生成 ASS Dialogue 失败")
 }
 
+/// 写入 ASS Script Info 和弹幕样式头部.
 fn write_header(output: &mut String, font_size: f64, settings: &AssSettings) {
     let font = if settings.font.trim().is_empty() {
         "Microsoft YaHei"

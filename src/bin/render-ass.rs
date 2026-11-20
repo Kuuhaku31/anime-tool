@@ -1,3 +1,7 @@
+
+// src/bin/render-ass.rs
+// 将 Dandanplay 弹幕缓存渲染为 ASS 字幕文件.
+
 use std::fs;
 
 use clap::Parser;
@@ -8,6 +12,7 @@ use anime_tool::{
     cli::CommonArgs,
 };
 
+/// `render-ass` 命令行参数.
 #[derive(Parser, Debug)]
 #[command(
     name = "render-ass",
@@ -15,41 +20,43 @@ use anime_tool::{
     about = "将 Dandanplay 原始弹幕 JSON 渲染为 ASS"
 )]
 struct Cli {
+    /// 缓存目录和 API 的通用参数.
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Dandanplay episode ID.
+    /// Dandanplay 剧集 ID.
     episode_id: i64,
 
-    /// Output ASS path.
+    /// ASS 输出路径.
     #[arg(long = "output_path")]
     output_path: Option<std::path::PathBuf>,
 
-    /// ASS font family.
+    /// ASS 字体名称.
     #[arg(long = "font")]
     font: Option<String>,
 
-    /// Mapped to ASS space by x1.6 and clamped to 18..96.
+    /// 用户侧字体大小, 按 1.6 倍映射到 ASS 坐标.
     #[arg(long = "font-size")]
     font_size: Option<f64>,
 
-    /// Opacity, 0.0..1.0. 1.0 is fully opaque.
+    /// 弹幕不透明度, 范围为 0.0..=1.0.
     #[arg(long = "alpha")]
     alpha: Option<f64>,
 
-    /// Use bold font.
+    /// 使用粗体字体.
     #[arg(long = "bold")]
     bold: bool,
 
-    /// Outline width in ASS space, clamped to 0..8.
+    /// ASS 描边宽度, 最大限制为 8.
     #[arg(long = "border")]
     border: Option<f64>,
 
-    /// Time offset in seconds. Positive = delay, negative = advance.
+    /// 弹幕时间偏移, 正值延后, 负值提前.
     #[arg(long = "offset")]
     offset: Option<f64>,
 }
 
+/// 读取缓存弹幕, 校验样式选项并写出 ASS 文件.
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.common.load_config()?;
@@ -70,6 +77,8 @@ fn main() -> anyhow::Result<()> {
         bold: cli.bold,
         border: cli.border.unwrap_or(defaults.border),
         offset: cli.offset.unwrap_or(defaults.offset),
+        scroll_duration: defaults.scroll_duration,
+        display_area: defaults.display_area,
     };
 
     if !(0.0..=1.0).contains(&settings.alpha) {

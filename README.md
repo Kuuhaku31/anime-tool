@@ -24,6 +24,8 @@
 
 1. 提供 Dandanplay 剧集 ID, 获取对应的弹幕数据, 将其原始 json 保存在缓存目录.
 2. 访问本地缓存目录, 将原始 json 渲染成 ASS 文件.
+3. Linux 可使用 `kg-play <media> <ddp-epi-id>` 实时播放媒体并显示数据库弹幕,
+   详情见 [kg-play 文档](docs/kg-play.md).
 
 ### 缓存检查
 
@@ -89,6 +91,21 @@ render-ass 123456 \
   --border 1 \
   --offset 0.5
 ```
+
+- `kg-play <media-path-or-url> <ddp-epi-id> [OPTIONS]`
+
+  使用 MPV 播放本地或网络媒体, 从 PostgreSQL `main` 读取剧集弹幕并显示为次字幕轨.
+  播放期间可在 `kg-play>` 输入命令调整弹幕, 每条命令后显示弹幕数量, 样式和 MPV 状态.
+  Linux 版要求安装 MPV,
+  并使用交互式终端.
+
+  例子:
+
+  ```bash
+  kg-play "/media/Anime Episode 01.mkv" 196000012 --offset -1.5 --speed 1.2
+  ```
+
+  选项, 环境变量和终端快捷键见 [kg-play 文档](docs/kg-play.md).
 
 - `ani-prepare <media_path> [OPTIONS]`
   1. 把视频文件复制到指定目录, 默认是当前路径下的 `<视频文件名称> - ani/` 目录,
