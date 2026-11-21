@@ -1,6 +1,6 @@
 
 //! src/bin/ods2pg.rs
-//! 按 ODS 工作表列映射, 自动遍历实际数据行并事务化 upsert 到 PostgreSQL.
+//! 按 ODS 工作表列映射, 逐行解析并独立 upsert 到 PostgreSQL.
 
 use std::{
     collections::HashSet,
@@ -50,6 +50,7 @@ struct PgOptions {
 struct ColumnMapping {
     ods_column: usize,    // 从 0 开始的 ODS 列索引.
     db_column: String,    // PostgreSQL 目标列名.
+    prefix_hex: bool,     // 非空值是否添加 PostgreSQL 十六进制前缀.
 }
 
 /// 主键映射与普通字段映射.
@@ -85,21 +86,25 @@ fn main() {
     }
 }
 
-/// 先完整读取和校验 ODS, 再连接数据库并事务化 upsert.
+/// 读取 ODS 并逐行导入, 最后报告成功和失败数量.
 fn run() -> Result<()> {
     let cli = Cli::parse();
     load_dotenv()?;
     let table = parse_table_name(&cli.table_name)?;
     let (positional, pg_options) = split_pg_options(cli.tail)?;
     let mappings = parse_mappings(&positional)?;
-    let rows = read_ods_rows(&cli.ods_file, &cli.sheet_name, &mappings)?;
+    let (rows, parse_failures) = read_ods_rows(&cli.ods_file, &cli.sheet_name, &mappings)?;
     let mut db = connect_postgres(pg_options)?;
-    let count = upsert_rows(&mut db, &table.0, &table.1, &mappings, &rows)?;
+    let (count, write_failures) = upsert_rows(&mut db, &table.0, &table.1, &mappings, &rows)?;
+    let failures = parse_failures + write_failures;
 
     println!(
-        "已从 {} 工作表 {:?} 同步 {} 行到 {}.{}",
-        cli.ods_file.display(), cli.sheet_name, count, table.0, table.1
+        "从 {} 工作表 {:?} 同步到 {}.{}: 成功 {} 行, 失败 {} 行",
+        cli.ods_file.display(), cli.sheet_name, table.0, table.1, count, failures
     );
+    if failures > 0 {
+        bail!("部分 ODS 数据行导入失败");
+    }
     Ok(())
 }
 
@@ -161,45 +166,63 @@ fn parse_mappings(args: &[String]) -> Result<Mappings> {
     }
     let primary_args = &args[..separator];
     let update_args = &args[separator + 1..];
-    if primary_args.len() % 2 != 0 || update_args.len() % 2 != 0 {
-        bail!("主键和普通字段映射必须分别以 ODS 列名和数据库列名成对提供");
-    }
     if primary_args.is_empty() || update_args.is_empty() {
         bail!("至少提供一个主键映射和一个普通字段映射");
     }
 
     let mut source_columns = HashSet::new();
     let mut target_columns = HashSet::new();
-    let primary_keys = parse_mapping_pairs(primary_args, &mut source_columns, &mut target_columns)?;
-    let update_fields = parse_mapping_pairs(update_args, &mut source_columns, &mut target_columns)?;
+    let primary_keys = parse_mapping_pairs(primary_args, true, &mut source_columns, &mut target_columns)?;
+    let update_fields = parse_mapping_pairs(update_args, false, &mut source_columns, &mut target_columns)?;
     Ok(Mappings { primary_keys, update_fields })
 }
 
-/// 解析同一侧的成对映射, 并拒绝重复 ODS 或数据库列.
+/// 解析映射及主键可选的 x 标记, 并拒绝重复 ODS 或数据库列.
 fn parse_mapping_pairs(
     args: &[String],
+    primary: bool,
     source_columns: &mut HashSet<usize>,
     target_columns: &mut HashSet<String>,
 ) -> Result<Vec<ColumnMapping>> {
-    args.chunks_exact(2)
-        .map(|pair| {
-            let ods_column = parse_column_name(&pair[0])
-                .with_context(|| format!("无效的 ODS 列名: {:?}", pair[0]))?;
-            if !source_columns.insert(ods_column) {
-                bail!("ODS 列 {} 被重复映射", pair[0]);
-            }
-            if pair[1].is_empty() || pair[1].contains('\0') {
-                bail!("PostgreSQL 列名不能为空或包含 NUL 字符");
-            }
-            if !target_columns.insert(pair[1].clone()) {
-                bail!("PostgreSQL 列 {} 被重复映射", pair[1]);
-            }
-            Ok(ColumnMapping {
-                ods_column,
-                db_column: pair[1].clone(),
-            })
-        })
-        .collect()
+    // 从后向前确认剩余参数能否构成完整映射, 允许末尾的目标列名为 x.
+    let mut valid = vec![false; args.len() + 1];
+    valid[args.len()] = true;
+    for index in (0..args.len()).rev() {
+        if parse_column_name(&args[index]).is_err() {
+            continue;
+        }
+        let name_valid = |name: &str| !name.is_empty() && !name.contains('\0');
+        valid[index] = (index + 2 <= args.len()
+            && name_valid(&args[index + 1]) && valid[index + 2])
+            || (primary && index + 3 <= args.len() && args[index + 1] == "x"
+                && name_valid(&args[index + 2]) && valid[index + 3]);
+    }
+    if !valid[0] {
+        bail!("映射格式必须为 ODS 列名 [x] 数据库列名, 普通字段不支持 x 标记");
+    }
+    let mut mappings = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let prefix_hex = primary && index + 3 <= args.len() && args[index + 1] == "x"
+            && !args[index + 2].is_empty() && !args[index + 2].contains('\0')
+            && valid[index + 3];
+        let name_index = index + if prefix_hex { 2 } else { 1 };
+        let ods_column = parse_column_name(&args[index])
+            .with_context(|| format!("无效的 ODS 列名: {:?}", args[index]))?;
+        if !source_columns.insert(ods_column) {
+            bail!("ODS 列 {} 被重复映射", args[index]);
+        }
+        if !target_columns.insert(args[name_index].clone()) {
+            bail!("PostgreSQL 列 {} 被重复映射", args[name_index]);
+        }
+        mappings.push(ColumnMapping {
+            ods_column,
+            db_column: args[name_index].clone(),
+            prefix_hex,
+        });
+        index = name_index + 1;
+    }
+    Ok(mappings)
 }
 
 /// 将 ASCII 字母列名转换为从 0 开始的列索引.
@@ -238,7 +261,7 @@ fn read_ods_rows(
     path: &Path,
     sheet_name: &str,
     mappings: &Mappings,
-) -> Result<Vec<OdsRow>> {
+) -> Result<(Vec<OdsRow>, usize)> {
     if !path.is_file() {
         bail!("ODS 路径不是普通文件: {}", path.display());
     }
@@ -280,15 +303,28 @@ fn read_ods_rows(
         .checked_add(1)
         .context("工作表行数超出平台容量")?;
     let mut rows = Vec::with_capacity(row_count);
+    let mut failures = 0;
     for row_index in first_row..=last_row {
-        let mut values = Vec::with_capacity(mappings.primary_keys.len() + mappings.update_fields.len());
-        for mapping in mappings.primary_keys.iter().chain(&mappings.update_fields) {
-            let column_index = u32::try_from(mapping.ods_column).context("ODS 列索引超出坐标范围")?;
-            let cell = range.get_value((row_index, column_index))
-                .with_context(|| format!("ODS 第 {} 行第 {} 列超出工作表范围", row_index + 1, column_index + 1))?;
-            values.push(cell_to_text(cell)
-                .with_context(|| format!("读取 ODS 第 {} 行第 {} 列失败", row_index + 1, column_index + 1))?);
-        }
+        let values = mappings.primary_keys.iter().chain(&mappings.update_fields)
+            .map(|mapping| {
+                let column_index = u32::try_from(mapping.ods_column).context("ODS 列索引超出坐标范围")?;
+                let cell = range.get_value((row_index, column_index))
+                    .with_context(|| format!("ODS 第 {} 行第 {} 列超出工作表范围", row_index + 1, column_index + 1))?;
+                let value = cell_to_text(cell)
+                    .with_context(|| format!("读取 ODS 第 {} 行第 {} 列失败", row_index + 1, column_index + 1))?;
+                Ok(value.map(|value| {
+                    if mapping.prefix_hex { format!("\\x{value}") } else { value }
+                }))
+            })
+            .collect::<Result<Vec<_>>>();
+        let values = match values {
+            Ok(values) => values,
+            Err(error) => {
+                eprintln!("{error:#}");
+                failures += 1;
+                continue;
+            }
+        };
         if values.iter().all(Option::is_none) {
             continue;
         }
@@ -297,7 +333,7 @@ fn read_ods_rows(
             values,
         });
     }
-    Ok(rows)
+    Ok((rows, failures))
 }
 
 /// 将 ODS 单元格转换为数据库文本参数, 空值保留为 SQL NULL.
@@ -369,14 +405,14 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// 以目录中的目标列类型生成 upsert SQL 并在同一个事务内写入所有行.
+/// 以目录中的目标列类型生成 upsert SQL, 每行单独提交并记录失败.
 fn upsert_rows(
     db: &mut Client,
     schema: &str,
     table: &str,
     mappings: &Mappings,
     rows: &[OdsRow],
-) -> Result<u64> {
+) -> Result<(u64, usize)> {
     let qualified_table = format!("{}.{}", quote_identifier(schema), quote_identifier(table));
     let mut transaction = db.transaction().context("开始 ODS 导入事务失败")?;
     transaction.batch_execute(&format!("LOCK TABLE {qualified_table} IN ROW EXCLUSIVE MODE"))
@@ -384,18 +420,41 @@ fn upsert_rows(
     let columns = load_column_types(&mut transaction, schema, table)?;
     let resolved = mappings.clone_with_types(&columns)?;
     let sql = build_upsert_sql(schema, table, &resolved);
-    let statement = transaction.prepare(&sql).context("准备 upsert SQL 失败")?;
+    transaction.commit().context("提交目标表检查事务失败")?;
+    let statement = db.prepare(&sql).context("准备 upsert SQL 失败")?;
     let mut total = 0u64;
+    let mut failures = 0;
     for row in rows {
         if mappings.primary_keys.iter().enumerate().any(|(index, _)| row.values[index].is_none()) {
-            bail!("ODS 第 {} 行的主键映射不能为空", row.row_number);
+            eprintln!("ODS 第 {} 行的主键映射不能为空", row.row_number);
+            failures += 1;
+            continue;
         }
         let params = row.values.iter().map(|value| value as &(dyn ToSql + Sync)).collect::<Vec<_>>();
-        total += transaction.execute(&statement, &params)
-            .with_context(|| format!("写入 ODS 第 {} 行失败", row.row_number))?;
+        let mut row_transaction = db.transaction().context("开始 ODS 数据行事务失败")?;
+        let result = match row_transaction.execute(&statement, &params) {
+            Ok(count) => row_transaction.commit().map(|()| count),
+            Err(error) => {
+                row_transaction.rollback().context("回滚 ODS 数据行事务失败")?;
+                Err(error)
+            }
+        };
+        match result {
+            Ok(count) => total += count,
+            Err(error) => {
+                if let Some(database_error) = error.as_db_error() {
+                    eprintln!("写入 ODS 第 {} 行失败: {}", row.row_number, database_error.message());
+                    if let Some(detail) = database_error.detail() {
+                        eprintln!("数据库详情: {detail}");
+                    }
+                    failures += 1;
+                } else {
+                    return Err(error).with_context(|| format!("写入 ODS 第 {} 行时数据库连接或协议失败", row.row_number));
+                }
+            }
+        }
     }
-    transaction.commit().context("提交 ODS 导入事务失败")?;
-    Ok(total)
+    Ok((total, failures))
 }
 
 /// 获取目标表中所有映射列的完整类型信息.

@@ -182,9 +182,10 @@ Tab 分隔时保留空列, 缺失的可选 ID 写入 NULL; 也接受空格分隔
 ### ODS 数据导入
 
 运行 `cargo run --bin ods2pg -- <ods-file> <sheet> <table> <pk-column>
-<pk-name> - <column> <name>`, 自动遍历工作表实际范围并按列映射写入
+[x] <pk-name> - <column> <name>`, 自动遍历工作表实际范围并按列映射写入
 PostgreSQL. 支持复合主键, 全映射字段为空的行会跳过, 其他空单元格写 SQL NULL.
-冲突时更新普通字段, 全部数据在单个事务中提交或回滚. 数据库参数可用
+主键标记 `x` 为非空值添加 `\x` 前缀. 冲突时更新普通字段, 每行独立提交,
+失败行不会影响其他行. 数据库参数可用
 `--pg-*` 选项或 `PG_*` 环境变量配置. 详见 [ODS 导入文档](docs/ods2pg.md).
 
 ### Bangumi 动画和剧集同步
