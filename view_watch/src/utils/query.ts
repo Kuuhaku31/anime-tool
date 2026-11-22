@@ -3,6 +3,16 @@
 // 将筛选条件安全转换为 PostgREST 查询.
 import type { WatchQuery } from "../models/watch.ts";
 
+/** 校验并规范化蜜柑 RSS ID, 空值表示不筛选. */
+export function parseMikanRssId(input: string): string {
+  const value = input.trim();
+  if (!value) return "";
+  if (!/^\d+$/.test(value) || Number(value) > 2147483647) {
+    throw new Error("请输入 0 到 2147483647 的整数.");
+  }
+  return String(Number(value));
+}
+
 /** 生成视图查询参数, 显式将 bigint 转为文本避免浏览器舍入. */
 export function watchParams(query: WatchQuery): URLSearchParams {
   const params = new URLSearchParams();
@@ -29,6 +39,8 @@ export function watchParams(query: WatchQuery): URLSearchParams {
       "dandanplay_anime_title", "dandanplay_episode_title"];
     params.set("or", `(${columns.map((column) => `${column}.ilike.${pattern}`).join(",")})`);
   }
+  const mikanRssId = parseMikanRssId(query.mikanRssId);
+  if (mikanRssId) params.set("mikan_rss_id", `eq.${mikanRssId}`);
   if (query.ddp === "null") params.set("ddp_epi_id", "is.null");
   if (query.ddp === "unmatchable") params.set("ddp_epi_id", "eq.-1");
   if (query.ddp === "assigned") params.set("ddp_epi_id", "not.is.null");

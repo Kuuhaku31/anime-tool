@@ -1,6 +1,6 @@
 
 // view_watch/src/state/watch-store.ts
-// 管理视图查询, 行内编辑和定时刷新.
+// 管理视图查询和行内编辑.
 import { PostgrestClient } from "../api/postgrest-client.ts";
 import type { EditorState, WatchPage, WatchQuery } from "../models/watch.ts";
 import { parseEpisodeId } from "../utils/bigint.ts";
@@ -8,7 +8,7 @@ import { parseEpisodeId } from "../utils/bigint.ts";
 /** 管理视图查询和文件关联编辑状态. */
 export class WatchStore extends EventTarget {
   /** 当前筛选和分页. */
-  query: WatchQuery = { search: "", ddp: "all", qb: "all", editable: "all",
+  query: WatchQuery = { search: "", mikanRssId: "", ddp: "all", qb: "all", editable: "all",
     sort: "mikan_rss_id", direction: "asc", page: 0, pageSize: 100 };
   /** 当前查询结果. */
   page: WatchPage = { items: [], total: 0 };
@@ -29,11 +29,9 @@ export class WatchStore extends EventTarget {
   /** 当前列表请求的递增序号. */
   private request = 0;
 
-  /** 启动初始查询和可见页面的定时刷新. */
+  /** 启动初始查询. */
   start(): void {
     void this.refresh();
-    window.setInterval(() => { if (!document.hidden) void this.refresh(); }, 10000);
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) void this.refresh(); });
   }
 
   /** 更新筛选条件并重新查询第一页. */

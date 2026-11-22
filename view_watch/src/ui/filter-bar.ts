@@ -4,6 +4,7 @@
 import type { SortField, WatchQuery } from "../models/watch.ts";
 import { WatchStore } from "../state/watch-store.ts";
 import { element } from "../utils/dom.ts";
+import { parseMikanRssId } from "../utils/query.ts";
 
 /** 创建过滤控件并在变化时更新查询. */
 export function filterBar(store: WatchStore): HTMLElement {
@@ -37,6 +38,53 @@ export function filterBar(store: WatchStore): HTMLElement {
     timer = window.setTimeout(() => store.setQuery({ search: search.value, page: 0 }), 300);
   });
   bar.append(search, searchMessage);
+  const rssId = element("input", undefined, "rss-id-filter");
+  rssId.type = "text";
+  rssId.inputMode = "numeric";
+  rssId.placeholder = "Mikan RSS ID";
+  rssId.setAttribute("aria-label", "Mikan RSS ID");
+  rssId.setAttribute("aria-describedby", "rss-id-message");
+  const rssMessage = element("span", "", "muted rss-id-message");
+  rssMessage.id = "rss-id-message";
+  rssMessage.setAttribute("aria-live", "polite");
+  const rssKey = "view-watch-mikan-rss-id";
+  rssId.value = store.query.mikanRssId;
+  try {
+    const saved = localStorage.getItem(rssKey);
+    if (saved !== null) {
+      try {
+        store.query.mikanRssId = parseMikanRssId(saved);
+        rssId.value = saved;
+      } catch {
+        rssMessage.textContent = "已忽略无效的 Mikan RSS ID 设置.";
+      }
+    }
+  } catch {
+    rssMessage.textContent = "无法读取 Mikan RSS ID 设置, 使用默认值.";
+  }
+  let rssTimer = 0;
+  rssId.addEventListener("input", () => {
+    window.clearTimeout(rssTimer);
+    let value: string;
+    try {
+      value = parseMikanRssId(rssId.value);
+    } catch {
+      rssId.setAttribute("aria-invalid", "true");
+      rssMessage.classList.add("error");
+      rssMessage.textContent = "请输入 0 到 2147483647 的整数, 保留上次有效筛选.";
+      return;
+    }
+    rssId.removeAttribute("aria-invalid");
+    rssMessage.classList.remove("error");
+    try {
+      localStorage.setItem(rssKey, rssId.value);
+      rssMessage.textContent = "";
+    } catch {
+      rssMessage.textContent = "无法保存 Mikan RSS ID, 设置仅在本次页面中有效.";
+    }
+    rssTimer = window.setTimeout(() => store.setQuery({ mikanRssId: value, page: 0 }), 300);
+  });
+  bar.append(rssId, rssMessage);
   bar.append(select("剧集状态", [["all", "全部剧集状态"], ["null", "未识别"], ["unmatchable", "无法关联"], ["assigned", "已设置"]],
     (value) => store.setQuery({ ddp: value as WatchQuery["ddp"], page: 0 })));
   bar.append(select("下载器状态", [["all", "全部下载器状态"], ["yes", "在 qBittorrent"], ["no", "不在 qBittorrent"]],

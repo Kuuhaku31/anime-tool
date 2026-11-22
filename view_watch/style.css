@@ -33,11 +33,12 @@ main { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; paddin
 .selection-control { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .selection-control input, .selection-cell input { width: 22px; height: 22px; padding: 0; accent-color: var(--primary); cursor: pointer; }
 .selection-cell input:disabled { cursor: not-allowed; }
-.selection-message:empty, .page-size-message:empty, .search-message:empty { display: none; }
+.selection-message:empty, .page-size-message:empty, .search-message:empty, .rss-id-message:empty { display: none; }
 .resize-message:empty { display: none; }
 .filters { flex: 1 1 540px; min-width: 0; }
 input, select, button { font: inherit; color: var(--foreground); background: var(--button); border: 1px solid var(--border); border-radius: 7px; padding: 4px 6px; }
 input[type="search"] { flex: 1 1 150px; min-width: 140px; }
+.rss-id-filter { width: 140px; }
 button { cursor: pointer; }
 button:hover { background: var(--button-hover); border-color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 button:disabled { opacity: .5; cursor: not-allowed; }

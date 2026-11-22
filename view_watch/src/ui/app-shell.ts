@@ -12,7 +12,8 @@ export function appShell(root: HTMLElement, store: WatchStore, toolbar: HTMLElem
   const actions = element("div", undefined, "header-actions");
   const status = element("span", "连接中", "status");
   const refresh = button("刷新", () => { void store.refresh(); });
-  actions.append(status, refresh);
+  const updatedAt = element("span", "最近刷新 -", "muted");
+  actions.append(status, refresh, updatedAt);
   header.append(title, actions);
   const main = element("main");
   const summary = element("div", undefined, "summary");
@@ -25,9 +26,10 @@ export function appShell(root: HTMLElement, store: WatchStore, toolbar: HTMLElem
   store.addEventListener("change", () => {
     const rows = store.page.items;
     status.textContent = store.error ? "连接异常" : store.loading ? "刷新中" : store.initialized ? "已连接" : "连接中";
+    updatedAt.textContent = `最近刷新 ${store.updatedAt?.toLocaleTimeString() ?? "-"}`;
     error.textContent = store.error ?? "";
     error.hidden = !store.error;
-    summary.textContent = `筛选结果 ${store.page.total} 行 | 本页可编辑 ${rows.filter((row) => row.file_sha256 !== null).length} 行 | 未识别 ${rows.filter((row) => row.file_sha256 !== null && row.ddp_epi_id === null).length} | 无法关联 ${rows.filter((row) => row.ddp_epi_id === "-1").length} | 已设置 ${rows.filter((row) => row.ddp_epi_id !== null && row.ddp_epi_id !== "-1").length} | 最近刷新 ${store.updatedAt?.toLocaleTimeString() ?? "-"}`;
+    summary.textContent = `筛选结果 ${store.page.total} 行 | 本页可编辑 ${rows.filter((row) => row.file_sha256 !== null).length} 行 | 未识别 ${rows.filter((row) => row.file_sha256 !== null && row.ddp_epi_id === null).length} | 无法关联 ${rows.filter((row) => row.ddp_epi_id === "-1").length} | 已设置 ${rows.filter((row) => row.ddp_epi_id !== null && row.ddp_epi_id !== "-1").length}`;
   });
   return content;
 }

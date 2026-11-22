@@ -39,6 +39,7 @@ export type SortField = "mikan_rss_id" | "mikan_torrent_pub_at" | "mikan_torrent
 /** 描述当前列表筛选和分页. */
 export interface WatchQuery {
   /** 搜索文本. */ search: string;
+  /** 蜜柑 RSS ID, 空字符串表示不筛选. */ mikanRssId: string;
   /** 剧集关联状态. */ ddp: "all" | "null" | "unmatchable" | "assigned";
   /** 下载器状态. */ qb: "all" | "yes" | "no";
   /** 是否拥有文件. */ editable: "all" | "yes" | "no";
