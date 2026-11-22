@@ -5,46 +5,43 @@ import type { WatchRow } from "../models/watch.ts";
 import { WatchStore } from "../state/watch-store.ts";
 import { button, element } from "../utils/dom.ts";
 
-/** 渲染剧集 ID 状态和可编辑控件. */
+/** 始终显示剧集 ID 输入框, 有文件时允许直接修改并提交. */
 export function episodeEditor(row: WatchRow, store: WatchStore): HTMLElement {
   const container = element("div", undefined, "editor");
   const hash = row.file_sha256;
-  if (!hash) {
-    container.append(element("span", "无文件, 不可编辑", "muted"));
-    return container;
-  }
-  const state = store.editors.get(hash);
-  if (!state) {
-    const label = row.ddp_epi_id === null ? "未识别" : row.ddp_epi_id === "-1" ? "无法关联"
-      : row.dandanplay_episode_title !== null || row.ddp_ani_id !== null ? `已关联 ${row.ddp_epi_id}`
-      : `未解析 ${row.ddp_epi_id}`;
-    container.append(element("span", label, "badge"), button("编辑", () => store.edit(hash, row.ddp_epi_id)));
-    return container;
-  }
+  const state = hash ? store.editors.get(hash) : undefined;
   const input = element("input");
   input.type = "text";
   input.inputMode = "numeric";
   input.autocomplete = "off";
-  input.placeholder = "空值表示未识别";
-  input.value = state.draft;
-  input.disabled = state.saving;
-  input.dataset.editor = hash;
-  input.setAttribute("aria-label", `文件 ${row.file_filename ?? hash} 的剧集 ID`);
+  input.placeholder = !hash ? "无文件, 无法编辑" : state?.saving ? "保存中" : "未识别, 点击输入";
+  input.value = state?.draft ?? row.ddp_epi_id ?? "";
+  input.disabled = !hash || !!state?.saving;
+  input.title = !hash ? "无对应文件, 无法编辑" : state?.saving ? "正在保存" : "编辑剧集 ID";
+  if (hash) input.dataset.editor = hash;
+  input.setAttribute("aria-label", `文件 ${row.file_filename ?? hash ?? "未知"} 的剧集 ID`);
+  container.append(input);
+  if (!hash) return container;
   input.addEventListener("input", () => {
-    store.draft(hash, input.value);
+    if (store.editors.has(hash)) {
+      store.draft(hash, input.value);
+    } else {
+      store.edit(hash, input.value);
+    }
     for (const other of document.querySelectorAll<HTMLInputElement>("input[data-editor]")) {
-      if (other !== input && other.dataset.editor === hash) other.value = input.value;
+      if (other !== input && other.dataset.editor === hash && other.value !== input.value) other.value = input.value;
     }
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") { event.preventDefault(); void store.save(hash); }
     if (event.key === "Escape") { event.preventDefault(); store.cancel(hash); }
   });
+  if (!state) return container;
   const save = button(state.saving ? "保存中" : "保存", () => { void store.save(hash); }, "primary");
   const cancel = button("取消", () => store.cancel(hash));
   save.disabled = state.saving;
   cancel.disabled = state.saving;
-  container.append(input, save, cancel);
+  container.append(save, cancel);
   if (state.error) {
     const error = element("span", state.error, "error");
     error.setAttribute("role", "alert");

@@ -8,7 +8,7 @@ import { button, element } from "../utils/dom.ts";
 export function appShell(root: HTMLElement, store: WatchStore, toolbar: HTMLElement): HTMLElement {
   const header = element("header");
   const title = element("div");
-  title.append(element("h1", "Anime Watch"), element("p", "view_watch 数据管理", "muted"));
+  title.append(element("h1", "Anime Watch"));
   const actions = element("div", undefined, "header-actions");
   const status = element("span", "连接中", "status");
   const refresh = button("刷新", () => { void store.refresh(); });
