@@ -1,0 +1,19 @@
+
+# view_watch/docker-compose.yml
+# 启动静态前端和仅在内部网络访问的 PostgREST.
+services:
+  watch-web:
+    build: .
+    ports:
+      - "127.0.0.1:${PORT:-56082}:8080"
+    depends_on:
+      - watch-rest
+    restart: unless-stopped
+  watch-rest:
+    image: postgrest/postgrest:v12.2.12
+    environment:
+      PGRST_DB_URI: "${PGRST_DB_URI:?Set PGRST_DB_URI in .env}"
+      PGRST_DB_SCHEMAS: "${PGRST_DB_SCHEMAS:-public}"
+      PGRST_DB_ANON_ROLE: "${PGRST_DB_ANON_ROLE:-watch_user}"
+      PGRST_SERVER_PORT: "3000"
+    restart: unless-stopped
