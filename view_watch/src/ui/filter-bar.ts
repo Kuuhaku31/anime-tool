@@ -7,7 +7,7 @@ import { element } from "../utils/dom.ts";
 
 /** 创建过滤控件并在变化时更新查询. */
 export function filterBar(store: WatchStore): HTMLElement {
-  const bar = element("section", undefined, "filters panel");
+  const bar = element("div", undefined, "filters");
   const search = element("input");
   search.type = "search";
   search.placeholder = "搜索文件, 路径, 番剧或种子";
@@ -30,7 +30,8 @@ export function filterBar(store: WatchStore): HTMLElement {
   (value) => store.setQuery({ sort: value as SortField, page: 0 })));
   bar.append(select("排序方向", [["asc", "升序"], ["desc", "降序"]],
     (value) => store.setQuery({ direction: value as WatchQuery["direction"], page: 0 })));
-  bar.append(select("每页数量", [["100", "100 行"], ["20", "20 行"], ["50", "50 行"], ["200", "200 行"]],
+  bar.append(select("每页数量", [["100", "100 行"], ["20", "20 行"], ["50", "50 行"], ["200", "200 行"],
+    ["500", "500 行"], ["1000", "1000 行"]],
     (value) => store.setQuery({ pageSize: Number(value), page: 0 })));
   return bar;
 }

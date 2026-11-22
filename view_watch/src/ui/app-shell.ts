@@ -4,25 +4,23 @@
 import { WatchStore } from "../state/watch-store.ts";
 import { button, element } from "../utils/dom.ts";
 
-/** 构建页面外壳并保持统计与连接状态同步. */
-export function appShell(root: HTMLElement, store: WatchStore): HTMLElement {
+/** 构建页面外壳, 将统计放入工具栏并保持连接状态同步. */
+export function appShell(root: HTMLElement, store: WatchStore, toolbar: HTMLElement): HTMLElement {
   const header = element("header");
   const title = element("div");
   title.append(element("h1", "Anime Watch"), element("p", "view_watch 数据管理", "muted"));
   const actions = element("div", undefined, "header-actions");
   const status = element("span", "连接中", "status");
   const refresh = button("刷新", () => { void store.refresh(); });
-  const theme = button("切换主题", () => {
-    document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  });
-  actions.append(status, refresh, theme);
+  actions.append(status, refresh);
   header.append(title, actions);
   const main = element("main");
   const summary = element("div", undefined, "summary");
+  toolbar.prepend(summary);
   const error = element("div", undefined, "error global-error");
   error.setAttribute("role", "alert");
   const content = element("div", undefined, "content");
-  main.append(summary, error, content);
+  main.append(error, content);
   root.append(header, main);
   store.addEventListener("change", () => {
     const rows = store.page.items;

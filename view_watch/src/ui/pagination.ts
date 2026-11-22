@@ -6,7 +6,7 @@ import { button, element } from "../utils/dom.ts";
 
 /** 创建随查询结果同步的分页控件. */
 export function pagination(store: WatchStore): HTMLElement {
-  const bar = element("nav", undefined, "pagination panel");
+  const bar = element("nav", undefined, "pagination");
   bar.setAttribute("aria-label", "分页");
   const first = button("首页", () => store.setQuery({ page: 0 }));
   const previous = button("上一页", () => store.setQuery({ page: Math.max(0, store.query.page - 1) }));
