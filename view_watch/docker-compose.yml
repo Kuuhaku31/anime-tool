@@ -5,7 +5,7 @@ services:
   watch-web:
     build: .
     ports:
-      - "127.0.0.1:${PORT:-56082}:8080"
+      - "0.0.0.0:${PORT:-56082}:8080"
     depends_on:
       - watch-rest
     restart: unless-stopped
