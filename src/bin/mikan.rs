@@ -1,6 +1,6 @@
 
 //! src/bin/mikan.rs
-//! 从 main.ids 读取蜜柑 RSS ID, 获取订阅内容并更新订阅和种子信息.
+//! 从 main.public.view_ids 读取蜜柑 RSS ID, 获取订阅内容并更新订阅和种子信息.
 
 use std::thread;
 
@@ -22,7 +22,7 @@ type Sha1Data   = [u8; 20];
 
 /// 无位置参数的同步命令, 支持标准帮助和版本选项.
 #[derive(Parser)]
-#[command(name = "mikan", version, about = "从 main.ids 获取蜜柑 RSS 并更新种子信息")]
+#[command(name = "mikan", version, about = "从 main.public.view_ids 获取蜜柑 RSS 并更新种子信息")]
 struct Cli {}
 
 /// 一次 RSS 请求解析出的频道信息和种子列表.
@@ -59,10 +59,10 @@ fn run() -> Result<()> {
     let mut db = env.connect_main(Some("PG_PORT 不是有效的 Unicode"))?;
 
     // 读取去重后的订阅 ID
-    let ids: Vec<i32> = db.query(utils::sql!("mikan/select_ids.sql"), &[]).context("读取 ids.mikan_rss_id 失败")?
+    let ids: Vec<i32> = db.query(utils::sql!("mikan/select_ids.sql"), &[]).context("读取 public.view_ids.mikan_rss_id 失败")?
     .into_iter().map(|row| row.try_get(0)).collect::<std::result::Result<_, _>>()?;
     if ids.is_empty() {
-        println!("ids 表中没有 mikan_rss_id, 无需同步");
+        println!("view_ids 中没有 mikan_rss_id, 无需同步");
         return Ok(());
     }
 

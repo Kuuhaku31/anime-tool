@@ -80,7 +80,9 @@ ALTER TABLE public.media_file
     ON DELETE NO ACTION;
 ```
 
-`ids.ddp_ani_id` 和 `media_file.ddp_epi_id` 均已扩展为 `bigint`.
+`media_file.ddp_epi_id` 使用 `bigint`.
+`ids` 只保存 `bgm_ani_id`, Dandanplay 动画 ID 从 `view_ids.ddp_ani_id` 查询,
+其类型为 `bigint`, 通过 `dandanplay_anime.bgm_ani_id` 关联得到.
 迁移会重建依赖 `media_file.ddp_epi_id` 的 `view_meida_file`.
 实际迁移脚本为 `src/kg/sql/ddp/migrate_schema.sql`.
 上述 SQL 记录了原迁移. 当前数据库的 `media_file.ddp_epi_id` 已无剧集外键,
@@ -144,7 +146,7 @@ CREATE INDEX dandanplay_danmaku_timeline_idx
 
 ## 同步行为
 
-- `ddp` 从 `public.ids.ddp_ani_id` 读取非 NULL 且去重排序后的 ID.
+- `ddp` 从 `public.view_ids.ddp_ani_id` 读取非 NULL 且去重排序后的 ID.
 - 每个动画独立事务, upsert 动画及其剧集, 刷新 `update_at`.
 - API 响应中的动画 ID 必须与请求 ID 相同; ID 和字段类型无效时不写入该动画.
 - API 未返回的历史剧集保留.

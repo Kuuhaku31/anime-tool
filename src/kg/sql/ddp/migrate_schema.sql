@@ -2,7 +2,7 @@
 -- src/kg/sql/ddp/migrate_schema.sql
 -- 创建 Dandanplay 表并扩大 ID 类型, 事务失败时整体回滚.
 BEGIN;
-LOCK TABLE public.ids, public.media_file IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE public.media_file IN ACCESS EXCLUSIVE MODE;
 
 DO $precondition$
 BEGIN
@@ -24,8 +24,6 @@ $precondition$;
 
 DROP VIEW public.view_meida_file;
 
-ALTER TABLE public.ids
-    ALTER COLUMN ddp_ani_id TYPE bigint USING ddp_ani_id::bigint;
 ALTER TABLE public.media_file
     ALTER COLUMN ddp_epi_id TYPE bigint USING ddp_epi_id::bigint;
 

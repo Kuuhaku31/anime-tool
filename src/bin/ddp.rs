@@ -1,6 +1,6 @@
 
 //! src/bin/ddp.rs
-//! 从 main.ids 获取 Dandanplay 动画并同步动画和剧集信息到 PostgreSQL.
+//! 从 main.public.view_ids 获取 Dandanplay 动画并同步动画和剧集信息到 PostgreSQL.
 
 use std::thread;
 
@@ -15,7 +15,7 @@ mod ddp_package;
 
 /// 无位置参数的 Dandanplay 同步命令.
 #[derive(Parser)]
-#[command(name = "ddp", version, about = "从 main.ids 获取 Dandanplay 动画并刷新动画和剧集表")]
+#[command(name = "ddp", version, about = "从 main.public.view_ids 获取 Dandanplay 动画并刷新动画和剧集表")]
 struct Cli {
     /// Dandanplay 认证和全局配置选项.
     #[command(flatten)]
@@ -46,11 +46,11 @@ fn run() -> Result<()> {
     let mut DB = env.connect_main(None)?;
     let ids = DB
         .query(utils::sql!("ddp/select_ids.sql"), &[])
-        .context("读取 public.ids.ddp_ani_id 失败")?
+        .context("读取 public.view_ids.ddp_ani_id 失败")?
         .into_iter()
         .map(|row| row.try_get(0).context("读取 Dandanplay 动画 ID 失败"))
         .collect::<Result<Vec<i64>>>()?;
-    if ids.is_empty() { println!("ids.ddp_ani_id 没有可同步的 ID"); return Ok(()); }
+    if ids.is_empty() { println!("view_ids.ddp_ani_id 没有可同步的 ID"); return Ok(()); }
 
     #[allow(non_snake_case)]
     let P = utils::progress_bar(ids.len(), utils::SYNC_PROGRESS_TEMPLATE, None)?; 

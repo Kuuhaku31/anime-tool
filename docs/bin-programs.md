@@ -94,7 +94,7 @@ cargo run --bin <程序名> -- <程序参数>
 
 ### [ddp](../src/bin/ddp.rs)
 
-- 功能: 从 `main.public.ids.ddp_ani_id` 读取动画 ID, 获取详情并逐动画事务化
+- 功能: 从 `main.public.view_ids.ddp_ani_id` 读取动画 ID, 获取详情并逐动画事务化
   更新 `dandanplay_anime` 和 `dandanplay_episode`.
 - 输入参数: 无位置参数; 接受 Dandanplay 通用选项.
 - 外部组件: PostgreSQL `main`; 带签名认证的 Dandanplay 动画详情 API;
@@ -153,7 +153,7 @@ cargo run --bin <程序名> -- <程序参数>
 
 ### [mikan](../src/bin/mikan.rs)
 
-- 功能: 从 `main.public.ids.mikan_rss_id` 读取订阅 ID, 获取并解析蜜柑 RSS,
+- 功能: 从 `main.public.view_ids.mikan_rss_id` 读取订阅 ID, 获取并解析蜜柑 RSS,
   逐订阅更新 `mikan_rss` 和 `mikan_torrent`; 不下载 torrent 文件.
 - 输入参数: 无位置参数. `MIKAN_RSS_BASE` 可覆盖 RSS 地址,
   `REQUEST_TIMEOUT` 和 `REQUEST_DELAY` 控制请求.
@@ -199,11 +199,10 @@ cargo run --bin <程序名> -- <程序参数>
 
 ### [set-ids](../src/bin/set-ids.rs)
 
-- 功能: 读取三列 ID 文本, 在单个事务中清空并替换 PostgreSQL `main.public.ids`
+- 功能: 读取单列 Bangumi ID 文本, 在单个事务中清空并替换 PostgreSQL `main.public.ids`
   的数据, 不删除表结构.
-- 输入参数: `<input>`; 每行依次为 `bgm_id`, 可选 `mikan_id`,
-  可选 `ddp_id`, 使用空格或 Tab 分隔; Tab 可保留中间空列.
-  空行和 `#` 开头的行跳过, ID 必须为正的 32 位整数.
+- 输入参数: `<input>`; 每行仅包含一个正的 32 位整数 `bgm_ani_id`,
+  空行和 `#` 开头的行跳过, 旧多列格式会报错.
 - 外部组件: 本地文本文件; PostgreSQL `main` 的 `public.ids`; 当前目录 `.env`.
 
 ### [set-db-ids](../src/bin/set-db-ids.rs)

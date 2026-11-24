@@ -150,7 +150,7 @@ render-ass 123456 \
 
 ### 蜜柑 RSS 同步
 
-运行 `cargo run --bin mikan`, 从 PostgreSQL `main.ids.mikan_rss_id` 读取
+运行 `cargo run --bin mikan`, 从 PostgreSQL `main.public.view_ids.mikan_rss_id` 读取
 非 NULL 且去重排序后的 ID, 顺序请求 RSS, 更新 `mikan_rss` 和 `mikan_torrent`.
 数据库使用 `PG_HOST`, `PG_USER`, `PG_PASSWORD`, 可选 `PG_PORT`,
 固定连接 `main`, 不使用 `PG_DB`. 支持当前目录的 `.env`, 进程环境变量优先.
@@ -173,11 +173,14 @@ PostgreSQL `main.public.ids` 表. 需要设置 `PG_HOST`, `PG_USER`, `PG_PASSWOR
 可选 `PG_PORT`, 支持当前目录的 `.env`, 已有环境变量优先.
 数据库固定为 `main`, 不使用 `PG_DB`.
 
-输入列顺序为 `bgm_id`, `mikan_id`, `ddp_id`, 与数据库字段排列顺序不同.
-Tab 分隔时保留空列, 缺失的可选 ID 写入 NULL; 也接受空格分隔的连续列.
-第一列必填, 非空 ID 必须是正的 32 位整数. 空行和以 `#` 开头的行会跳过,
+输入每行仅包含一个 `bgm_ani_id`, 必须是正的 32 位整数.
+`ids` 不再保存 `mikan_rss_id` 和 `ddp_ani_id`, 旧三列文件会在修改数据库前报错.
+空行和以 `#` 开头的行会跳过,
 重复记录原样保留. 文件中的所有行通过校验后, 才在同一事务中清空旧记录
 并批量写入; 失败时回滚. 空文件或仅含空行及注释的文件会清空表.
+
+`public.view_ids` 通过 `bgm_ani_id` 关联 `mikan_rss` 和 `dandanplay_anime`,
+提供 `mikan_rss_id` 和 `ddp_ani_id` 查询, 不作为 ID 列表的写入目标.
 
 ### ODS 数据导入
 
@@ -206,7 +209,7 @@ API 配置可用 `BANGUMI_API_BASE` (默认 `https://api.bgm.tv`),
 
 ### Dandanplay 动画和剧集同步
 
-运行 `cargo run --bin ddp`, 从 PostgreSQL `main.public.ids.ddp_ani_id` 读取动画 ID,
+运行 `cargo run --bin ddp`, 从 PostgreSQL `main.public.view_ids.ddp_ani_id` 读取动画 ID,
 请求 Dandanplay 番剧详情 API, 并更新 `dandanplay_anime` 和 `dandanplay_episode`.
 需要设置 `PG_HOST`, `PG_USER`, `PG_PASSWORD`, 可选 `PG_PORT`,
 以及全局配置或 `ANIME_TOOL_APPID`、`ANIME_TOOL_APPSECRET`.

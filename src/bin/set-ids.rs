@@ -1,6 +1,6 @@
 
 //! src/bin/set-ids.rs
-//! 读取三列 ID 文本, 在单个事务中覆盖 PostgreSQL main 数据库的 ids 表.
+//! 读取单列 Bangumi ID 文本, 在单个事务中覆盖 PostgreSQL main 数据库的 ids 表.
 
 use std::env;
 use std::fs;
@@ -15,15 +15,8 @@ use postgres::{Client, NoTls};
 #[derive(Parser)]
 #[command(name = "set-ids", version, about = "用文本文件覆盖 PostgreSQL main.public.ids 表")]
 struct Cli {
-    /// 输入文件, 列顺序为 bgm_id mikan_id ddp_id; Tab 分隔时保留空列.
+    /// 输入文件, 每行仅包含一个正整数 bgm_ani_id.
     input: PathBuf,
-}
-
-/// 一行经校验的 ID, 保持输入顺序和重复记录.
-struct IdRow {
-    bgm: i32,
-    mikan: Option<i32>,
-    ddp: Option<i32>,
 }
 
 /// 执行导入并在失败时打印完整错误链, 返回非零退出码.
@@ -53,13 +46,11 @@ fn run() -> Result<()> {
     tx.batch_execute("LOCK TABLE public.ids IN EXCLUSIVE MODE; DELETE FROM public.ids;")
         .context("锁定并清空 ids 表失败")?;
     let mut writer = tx.copy_in(
-        "COPY public.ids (bgm_ani_id, mikan_rss_id, ddp_ani_id) FROM STDIN",
+        "COPY public.ids (bgm_ani_id) FROM STDIN",
     ).context("开始批量写入 ids 表失败")?;
     for row in &rows {
-        // 仅输出经过校验的整数和 COPY 的 NULL 标记, 无需处理文本转义.
-        let mikan = row.mikan.map_or_else(|| "\\N".into(), |id| id.to_string());
-        let ddp = row.ddp.map_or_else(|| "\\N".into(), |id| id.to_string());
-        writeln!(writer, "{}\t{}\t{}", row.bgm, mikan, ddp)
+        // 仅输出经过校验的整数, 无需处理文本转义.
+        writeln!(writer, "{row}")
             .context("发送 ID 数据失败")?;
     }
     let count = writer.finish().context("批量写入 ids 表失败")?;
@@ -68,41 +59,24 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// 解析输入的 bgm, mikan, ddp 三列, 空行和整行注释不计入数据.
-fn parse_rows(text: &str) -> Result<Vec<IdRow>> {
-
-    /// 将非空字段解析为适合 PostgreSQL integer 的正整数, 空字段返回 None.
-    fn parse_id(value: Option<&str>, line: usize, column: &str) -> Result<Option<i32>> {
-        let Some(value) = value.filter(|value| !value.is_empty()) else {
-            return Ok(None);
-        };
-        let id: i32 = value.parse()
-            .with_context(|| format!("第 {line} 行的 {column} 不是有效的 32 位整数: {value:?}"))?;
-        if id <= 0 {
-            bail!("第 {line} 行的 {column} 必须大于 0: {id}");
-        }
-        Ok(Some(id))
-    }
-
+/// 解析单列 Bangumi ID, 拒绝旧多列格式并保留输入顺序和重复记录.
+fn parse_rows(text: &str) -> Result<Vec<i32>> {
     let mut rows = Vec::new();
     for (index, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         if line.trim().is_empty() || line.trim_start().starts_with('#') { continue; }
-        // 不能先 trim 再按空白拆分, 否则中间或末尾缺失的列会发生错位.
-        let columns: Vec<_> = if line.contains('\t') {
-            line.split('\t').map(str::trim).collect()
-        } else {
-            line.split_whitespace().collect()
-        };
-        if columns.len() > 3 {
-            bail!("第 {} 行超过三列, 期望 bgm_id mikan_id ddp_id", index + 1);
+        let columns: Vec<_> = line.split_whitespace().collect();
+        if columns.len() != 1 {
+            bail!(
+                "第 {} 行必须仅包含一列 bgm_ani_id, ids 已不再保存 mikan_rss_id 和 ddp_ani_id",
+                index + 1
+            );
         }
-        let bgm = parse_id(columns.first().copied(), index + 1, "bgm_id")?
-        .with_context(|| format!("第 {} 行缺少 bgm_id", index + 1))?;
-        rows.push(IdRow {
-            bgm,
-            mikan: parse_id(columns.get(1).copied(), index + 1, "mikan_id")?,
-            ddp: parse_id(columns.get(2).copied(), index + 1, "ddp_id")?,
-        });
+        let bgm: i32 = columns[0].parse()
+            .with_context(|| format!("第 {} 行的 bgm_ani_id 不是有效的 32 位整数: {:?}", index + 1, columns[0]))?;
+        if bgm <= 0 {
+            bail!("第 {} 行的 bgm_ani_id 必须大于 0: {bgm}", index + 1);
+        }
+        rows.push(bgm);
     }
     Ok(rows)
 }
