@@ -39,7 +39,7 @@ export class PostgrestClient {
 }
 
 /** 从 PostgREST 响应中提取安全可读的错误. */
-async function responseError(response: Response): Promise<Error> {
+export async function responseError(response: Response): Promise<Error> {
   const text = await response.text();
   try {
     const body: unknown = JSON.parse(text);

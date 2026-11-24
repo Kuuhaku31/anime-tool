@@ -11,6 +11,9 @@ export function watchTable(store: WatchStore, controls: HTMLElement): HTMLElemen
   const section = element("section", undefined, "panel table-panel");
   const resizeMessage = element("span", "", "muted resize-message");
   resizeMessage.setAttribute("aria-live", "polite");
+  const fileLegend = element("span", undefined, "file-legend");
+  fileLegend.append(element("span", "有关联文件", "file-present-legend"),
+    element("span", "无关联文件", "file-absent-legend"));
   const selectionLabel = element("label", undefined, "selection-control");
   const selectionEnabled = element("input");
   selectionEnabled.type = "checkbox";
@@ -170,7 +173,7 @@ export function watchTable(store: WatchStore, controls: HTMLElement): HTMLElemen
   const body = element("tbody");
   table.append(columns, head, body);
   scroll.append(table);
-  controls.append(selectionLabel, copySelected, selectionMessage, resizeMessage);
+  controls.append(selectionLabel, copySelected, selectionMessage, resizeMessage, fileLegend);
   section.append(scroll);
 
   /** 同步多选工具栏的数量和可用状态. */
@@ -311,7 +314,8 @@ export function watchTable(store: WatchStore, controls: HTMLElement): HTMLElemen
 
 /** 创建一条原始视图记录, 不根据文件哈希合并行. */
 function renderRow(row: WatchRow, store: WatchStore): HTMLTableRowElement {
-  const tr = element("tr", undefined, "watch-row");
+  // 以文件主键判断关联关系, 不使用下载器状态或可能缺失的文件名.
+  const tr = element("tr", undefined, `watch-row ${row.file_sha256 !== null ? "file-present" : "file-absent"}`);
   const filename = textCell(row.file_filename);
   const editor = element("td");
   editor.append(episodeEditor(row, store));

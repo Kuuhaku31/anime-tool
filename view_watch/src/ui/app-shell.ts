@@ -9,6 +9,15 @@ export function appShell(root: HTMLElement, store: WatchStore, toolbar: HTMLElem
   const header = element("header");
   const title = element("div");
   title.append(element("h1", "Anime Watch"));
+  const nav = element("nav", undefined, "page-nav");
+  nav.setAttribute("aria-label", "页面导航");
+  const files = element("a", "文件和种子");
+  files.href = "/";
+  files.setAttribute("aria-current", "page");
+  const episodes = element("a", "观看剧集");
+  episodes.href = "/episodes";
+  nav.append(files, episodes);
+  title.append(nav);
   const actions = element("div", undefined, "header-actions");
   const status = element("span", "连接中", "status");
   const refresh = button("刷新", () => { void store.refresh(); });

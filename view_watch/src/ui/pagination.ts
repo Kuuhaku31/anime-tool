@@ -1,11 +1,18 @@
 
 // view_watch/src/ui/pagination.ts
 // 提供范围显示和页码导航.
-import { WatchStore } from "../state/watch-store.ts";
 import { button, element } from "../utils/dom.ts";
 
+/** 分页控件需要的查询和事件接口. */
+interface PaginationStore extends EventTarget {
+  /** 当前分页参数. */ query: { page: number; pageSize: number };
+  /** 当前页和筛选后的总数. */ page: { items: unknown[]; total: number };
+  /** 是否正在加载. */ loading: boolean;
+  /** 更新当前页. */ setQuery(change: { page: number }): void;
+}
+
 /** 创建随查询结果同步的分页控件. */
-export function pagination(store: WatchStore): HTMLElement {
+export function pagination(store: PaginationStore): HTMLElement {
   const bar = element("nav", undefined, "pagination");
   bar.setAttribute("aria-label", "分页");
   const first = button("首页", () => store.setQuery({ page: 0 }));
