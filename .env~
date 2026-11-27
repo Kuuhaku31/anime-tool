@@ -1,0 +1,13 @@
+QB_URL=https://qb.kuuhaku.dedyn.io
+
+QB_USERNAME=kuuhaku
+QB_PASSWORD=pi141592k
+
+
+PG_HOST=yani.kuuhaku.dedyn.io
+PG_PORT=30002
+PG_USER=kuuhaku
+PG_PASSWORD=pass
+PG_DB=main
+
+MEDIA_DIRS='["D:\\qb\\downloads\a\ani"]'

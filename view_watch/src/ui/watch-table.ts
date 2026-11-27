@@ -387,12 +387,18 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-/** 写入系统剪贴板, 在非安全上下文使用浏览器传统复制接口. */
+/** 写入系统剪贴板, 优先使用传统复制接口以避免 iOS 浏览器把换行编码为 %0A. */
 async function copyText(value: string): Promise<void> {
+  if (legacyCopy(value)) return;
   if (navigator.clipboard) {
     await navigator.clipboard.writeText(value);
     return;
   }
+  throw new Error("浏览器拒绝复制");
+}
+
+/** 通过临时 textarea 与 execCommand 复制纯文本, 失败返回 false. */
+function legacyCopy(value: string): boolean {
   const input = element("textarea");
   input.value = value;
   input.setAttribute("readonly", "");
@@ -400,8 +406,12 @@ async function copyText(value: string): Promise<void> {
   input.style.opacity = "0";
   document.body.append(input);
   try {
+    input.focus();
     input.select();
-    if (!document.execCommand("copy")) throw new Error("浏览器拒绝复制");
+    input.setSelectionRange(0, value.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
   } finally {
     input.remove();
   }

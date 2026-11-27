@@ -23,7 +23,10 @@ type Sha1Data   = [u8; 20];
 /// 无位置参数的同步命令, 支持标准帮助和版本选项.
 #[derive(Parser)]
 #[command(name = "mikan", version, about = "从 main.public.view_ids 获取蜜柑 RSS 并更新种子信息")]
-struct Cli {}
+struct Cli {
+    /// 指定要更新的蜜柑 RSS ID, 省略时从数据库读取全部 ID
+    id: Option<i32>,
+}
 
 /// 一次 RSS 请求解析出的频道信息和种子列表.
 struct Feed {
@@ -52,15 +55,18 @@ fn main() {
 /// 读取去重后的订阅 ID, 顺序获取并逐订阅提交, 单项失败不影响后续项.
 fn run() -> Result<()> {
 
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
     let env = utils::EnvConfig::load(false)?;
 
     let config = env.mikan()?;
     let mut db = env.connect_main(Some("PG_PORT 不是有效的 Unicode"))?;
 
-    // 读取去重后的订阅 ID
-    let ids: Vec<i32> = db.query(utils::sql!("mikan/select_ids.sql"), &[]).context("读取 public.view_ids.mikan_rss_id 失败")?
-    .into_iter().map(|row| row.try_get(0)).collect::<std::result::Result<_, _>>()?;
+    // 指定了 ID 时直接使用, 否则读取去重后的订阅 ID
+    let ids: Vec<i32> = match cli.id {
+        Some(id) => vec![id],
+        None => db.query(utils::sql!("mikan/select_ids.sql"), &[]).context("读取 public.view_ids.mikan_rss_id 失败")?
+            .into_iter().map(|row| row.try_get(0)).collect::<std::result::Result<_, _>>()?,
+    };
     if ids.is_empty() {
         println!("view_ids 中没有 mikan_rss_id, 无需同步");
         return Ok(());
